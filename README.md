@@ -23,8 +23,8 @@ Google Drive PDFs --> extract text --> Gemini splits into articles --> Neon Post
 Being built phase by phase:
 
 - [x] **Phase 1: Database setup** -- `db/schema.sql`, `db/migrate.py`
-- [ ] Phase 2: Ingestion (Drive sync, text extraction, Gemini article
-      splitting, chunking + embedding)
+- [x] **Phase 2: Ingestion** -- `ingest/` (Drive sync, text extraction,
+      Gemini article splitting, chunking + embedding, Postgres writes)
 - [ ] Phase 3: Query routing (issue-scoped vs. open topic search)
 - [ ] Phase 4: Answer generation with citations
 - [ ] Phase 5: Chat UI (`web/`)
@@ -63,16 +63,74 @@ can't be indexed and every query would fall back to a full scan.
 adding photos later without a schema change -- see the migration note in
 the original build spec about `gemini-embedding-2`'s multimodal embeddings.
 
+## Phase 2: Ingestion
+
+```bash
+python -m ingest.run_pipeline sync              # pull PDFs from Drive into staging/raw/
+python -m ingest.run_pipeline process            # extract, split, chunk, embed, write to Postgres
+python -m ingest.run_pipeline process --force    # reprocess even if already in the database
+python -m ingest.run_pipeline all                # sync then process
+```
+
+Needs, beyond `.env`: a GCP service account with the Drive folder shared to
+its `client_email` (Viewer), JSON key path in `GOOGLE_SERVICE_ACCOUNT_FILE`
+(defaults to `./secrets/drive-service-account.json`, which is gitignored).
+
+Pipeline, per PDF:
+
+1. `ingest/drive_sync.py` walks the whole Drive folder tree recursively and
+   downloads every `application/pdf`, regardless of how it's organized. Also
+   writes `staging/raw/.drive_ids.json` (filename -> Drive file ID), since
+   `articles.drive_file_id` needs the real ID and `process` works from local
+   files.
+2. `ingest/extract_text.py` pulls the text layer directly (PyMuPDF, no OCR).
+3. `ingest/detect_issue_date.py` tries the filename, then the first 2 pages'
+   text. Undated PDFs are logged to `staging/manual_review.csv` rather than
+   guessed.
+4. `ingest/split_articles.py` sends the issue's text to Gemini
+   (`gemini-3.7-flash`, structured JSON output) to identify each article's
+   title/author/line-range boundaries -- not the body text itself, so
+   there's no risk of the model truncating or paraphrasing a long issue.
+   The body is sliced from the *original* extracted text client-side, so
+   citations stay byte-exact. A malformed response gets one retry, then the
+   PDF is logged to manual review and skipped.
+5. Each article is inserted into `articles`, keeping `drive_file_id` so
+   citations can always trace back to the source PDF. For 2021+ issues,
+   `ingest/web_archive.py` looks up the matching mcciapunesampada.com page
+   for `source_url` (best-effort -- a network hiccup never fails the run).
+6. `ingest/chunking.py` splits the body into ~300-token chunks with a ~50
+   token overlap; `ingest/embeddings.py` embeds each with
+   `gemini-embedding-001` at 1536 dimensions (batched, L2-normalized per
+   Google's guidance for non-default dimensionality) and inserts into
+   `chunks`.
+
+Resumable per Phase 2's spec: `already_ingested()` checks the database
+itself (any article with this Drive file ID) rather than a local manifest,
+so a crash partway through doesn't mean starting over -- just re-run
+`process`. One PDF's unexpected failure is logged and skipped rather than
+stopping the whole run.
+
+**Schema gap flagged, not guessed:** the original spec's step 7 also
+mentions pulling topic tags into the archive, but the approved Phase 1
+schema has no `topic_tags` column -- confirmed with the user to store only
+`source_url` and drop tags rather than alter the already-built schema.
+
 ## Tests
 
 ```bash
 python -m pytest
 ```
 
-Phase 1's tests check `db/schema.sql`'s structure directly (extension,
-columns, cascade delete, embedding dimensions, indexes) rather than
-requiring a live database -- `python -m db.migrate` against a real
-`DATABASE_URL` is the actual verification.
+56 tests, all passing, covering: the schema's structure (Phase 1), issue-date
+detection across filename/cover-text formats, PDF text extraction, article
+boundary slicing and Gemini response validation/retry (with a fake client,
+no real API calls), chunking, embedding batching/normalization (fake
+client), Postgres writes and resumability (fake connection), the
+mcciapunesampada.com feed parsing, and an end-to-end `process` run against a
+synthetic PDF with Gemini and Postgres both stubbed. None of this has been
+run against real Gemini or Neon credentials yet (none are configured in this
+environment) -- worth a manual dry run against a single real issue before
+pointing this at the full 70-year archive.
 
 ## Web app
 

@@ -1,0 +1,154 @@
+from ingest.db_writer import already_ingested, insert_article, insert_chunks, write_article
+from ingest.split_articles import Article
+
+
+class _FakeCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append((sql.strip(), params))
+        if "select 1 from articles" in sql:
+            self._conn.next_fetchone = (1,) if params[0] in self._conn.existing_drive_ids else None
+        elif "insert into articles" in sql:
+            self._conn.next_id += 1
+            self._conn.last_inserted_id = self._conn.next_id
+
+    def executemany(self, sql, seq_of_params):
+        params_list = list(seq_of_params)
+        self._conn.executed.append((sql.strip(), params_list))
+        self._conn.executemany_calls.append(params_list)
+
+    def fetchone(self):
+        return self._conn.next_fetchone if hasattr(self._conn, "next_fetchone") else (self._conn.last_inserted_id,)
+
+
+class _FakeConnection:
+    def __init__(self, existing_drive_ids=()):
+        self.executed = []
+        self.executemany_calls = []
+        self.next_id = 0
+        self.last_inserted_id = None
+        self.existing_drive_ids = set(existing_drive_ids)
+        self.committed = False
+
+    def cursor(self):
+        return _FakeCursor(self)
+
+    def commit(self):
+        self.committed = True
+
+
+def test_already_ingested_true_when_drive_id_present():
+    conn = _FakeConnection(existing_drive_ids={"abc123"})
+    assert already_ingested(conn, "abc123") is True
+
+
+def test_already_ingested_false_when_drive_id_absent():
+    conn = _FakeConnection(existing_drive_ids={"abc123"})
+    assert already_ingested(conn, "not-there") is False
+
+
+def test_insert_article_returns_new_id():
+    conn = _FakeConnection()
+    article_id = insert_article(
+        conn,
+        issue_month="2021-06",
+        issue_year=2021,
+        article_title="Editorial",
+        author="Jane Doe",
+        body="Welcome to this issue.",
+        source_url="https://example.com/p/sampada-june-2021.html",
+        drive_file_id="abc123",
+    )
+    assert article_id == 1
+    sql, params = conn.executed[-1]
+    assert "insert into articles" in sql
+    assert params == (
+        "2021-06",
+        2021,
+        "Editorial",
+        "Jane Doe",
+        "Welcome to this issue.",
+        "https://example.com/p/sampada-june-2021.html",
+        "abc123",
+    )
+
+
+def test_insert_article_stores_empty_author_as_null():
+    conn = _FakeConnection()
+    insert_article(
+        conn,
+        issue_month="2021-06",
+        issue_year=2021,
+        article_title="Editorial",
+        author="",
+        body="body",
+        source_url=None,
+        drive_file_id="abc123",
+    )
+    _, params = conn.executed[-1]
+    assert params[3] is None  # author
+
+
+def test_insert_chunks_writes_one_row_per_chunk_in_order():
+    conn = _FakeConnection()
+    insert_chunks(conn, article_id=42, chunks=["a", "b", "c"], embeddings=[[0.1], [0.2], [0.3]])
+
+    [params_list] = conn.executemany_calls
+    assert params_list == [
+        (42, 0, "a", [0.1]),
+        (42, 1, "b", [0.2]),
+        (42, 2, "c", [0.3]),
+    ]
+
+
+def test_write_article_chunks_embeds_and_inserts(monkeypatch):
+    monkeypatch.setattr(
+        "ingest.db_writer.embed_texts",
+        lambda chunks, task_type: [[0.0] * 1536 for _ in chunks],
+    )
+    monkeypatch.setattr("ingest.db_writer.chunk_text", lambda body: ["chunk one", "chunk two"])
+
+    conn = _FakeConnection()
+    article = Article(title="Editorial", author="Jane Doe", body="Welcome to this issue.")
+
+    article_id = write_article(
+        conn,
+        article,
+        issue_month="2021-06",
+        issue_year=2021,
+        source_url=None,
+        drive_file_id="abc123",
+    )
+
+    assert article_id == 1
+    [chunk_params] = conn.executemany_calls
+    assert [p[2] for p in chunk_params] == ["chunk one", "chunk two"]
+
+
+def test_write_article_skips_embedding_when_body_produces_no_chunks(monkeypatch):
+    monkeypatch.setattr("ingest.db_writer.chunk_text", lambda body: [])
+
+    def boom(*args, **kwargs):
+        raise AssertionError("embed_texts should not be called for zero chunks")
+
+    monkeypatch.setattr("ingest.db_writer.embed_texts", boom)
+
+    conn = _FakeConnection()
+    article = Article(title="Empty", author="", body="")
+    write_article(
+        conn,
+        article,
+        issue_month="2021-06",
+        issue_year=2021,
+        source_url=None,
+        drive_file_id="abc123",
+    )
+    assert conn.executemany_calls == []

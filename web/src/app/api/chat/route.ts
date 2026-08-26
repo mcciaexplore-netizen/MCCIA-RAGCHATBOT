@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { generateAnswer } from "@/lib/bedrock/generate-answer";
-import { classifyQuery } from "@/lib/bedrock/query-router";
+import { generateAnswer } from "@/lib/gemini/generate-answer";
+import { classifyQuery } from "@/lib/gemini/query-router";
 import type { ChatApiResponse } from "@/lib/types";
 
 const ChatRequestSchema = z.object({

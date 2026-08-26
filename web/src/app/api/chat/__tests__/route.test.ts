@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/bedrock/query-router", () => ({
+vi.mock("@/lib/gemini/query-router", () => ({
   classifyQuery: vi.fn(),
 }));
-vi.mock("@/lib/bedrock/generate-answer", () => ({
+vi.mock("@/lib/gemini/generate-answer", () => ({
   generateAnswer: vi.fn(),
 }));
 
-import { generateAnswer } from "@/lib/bedrock/generate-answer";
-import { classifyQuery } from "@/lib/bedrock/query-router";
+import { generateAnswer } from "@/lib/gemini/generate-answer";
+import { classifyQuery } from "@/lib/gemini/query-router";
 import { POST } from "../route";
 
 function jsonRequest(body: unknown): Request {
@@ -56,7 +56,7 @@ describe("POST /api/chat", () => {
     expect(body.issueMonth).toBeNull();
   });
 
-  it("rejects a missing question with 400 before calling Bedrock", async () => {
+  it("rejects a missing question with 400 before calling the backend", async () => {
     const response = await POST(jsonRequest({}));
     expect(response.status).toBe(400);
     expect(classifyQuery).not.toHaveBeenCalled();
@@ -74,13 +74,13 @@ describe("POST /api/chat", () => {
     expect(response.status).toBe(400);
   });
 
-  it("returns 500 with a generic message when Bedrock throws", async () => {
-    vi.mocked(classifyQuery).mockRejectedValue(new Error("Bedrock is down"));
+  it("returns 500 with a generic message when the backend throws", async () => {
+    vi.mocked(classifyQuery).mockRejectedValue(new Error("Gemini is down"));
 
     const response = await POST(jsonRequest({ question: "anything" }));
     const body = await response.json();
 
     expect(response.status).toBe(500);
-    expect(body.error).not.toContain("Bedrock is down");
+    expect(body.error).not.toContain("Gemini is down");
   });
 });

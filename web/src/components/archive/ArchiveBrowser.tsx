@@ -46,7 +46,7 @@ export function ArchiveBrowser({ issues }: { issues: BrowseIssue[] }) {
             <h2 className="font-heading text-2xl text-brand-primary">{issue.label}</h2>
             <ul className="mt-2 flex flex-col gap-1">
               {issue.articles.map((article) => (
-                <li key={article.slug}>
+                <li key={article.id}>
                   {article.sourceUrl ? (
                     <a
                       href={article.sourceUrl}

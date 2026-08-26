@@ -16,6 +16,8 @@ for Aurora pgvector or a Bedrock Knowledge Base as a possible future move).
   EventBridge schedule)
 - `tests/` -- pytest suite for the above
 - `.env.example.aws` -- the env vars this pipeline needs
+- `web-bedrock/` -- the Next.js app's original query-router/generate-answer
+  modules (Phase 5 replaced these; see its own README)
 
 To run any of this, create a venv and `pip install -r requirements.txt`
 from this directory.

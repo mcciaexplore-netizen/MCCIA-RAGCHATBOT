@@ -12,10 +12,10 @@ const ISSUES: BrowseIssue[] = [
     issueMonth: "2021-06",
     label: "June 2021",
     articles: [
-      { title: "Editorial", slug: "editorial", sourceUrl: "" },
+      { id: 1, title: "Editorial", sourceUrl: "" },
       {
+        id: 2,
         title: "Women in Robotics",
-        slug: "women-in-robotics",
         sourceUrl: "https://mcciapunesampada.com/2021/06/women-in-robotics.html",
       },
     ],
@@ -25,7 +25,7 @@ const ISSUES: BrowseIssue[] = [
     month: 5,
     issueMonth: "2020-05",
     label: "May 2020",
-    articles: [{ title: "COVID Relief", slug: "covid-relief", sourceUrl: "" }],
+    articles: [{ id: 3, title: "COVID Relief", sourceUrl: "" }],
   },
 ];
 

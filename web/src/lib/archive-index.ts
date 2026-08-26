@@ -1,28 +1,66 @@
 import "server-only";
-import { GetObjectCommand, NoSuchKey, S3Client } from "@aws-sdk/client-s3";
-import { config } from "@/lib/config";
-import { BROWSE_INDEX_KEY, type BrowseIndex } from "@/lib/types";
+import type { NeonQueryFunction } from "@neondatabase/serverless";
+import { getDb } from "@/lib/db";
+import { formatIssueMonth } from "@/lib/format";
+import type { BrowseIndex, BrowseIssue } from "@/lib/types";
 
-const EMPTY_INDEX: BrowseIndex = { issues: [] };
+type ArticleRow = {
+  id: number;
+  issueMonth: string;
+  issueYear: number;
+  articleTitle: string;
+  sourceUrl: string | null;
+};
 
-function buildClient(): S3Client {
-  return new S3Client({ region: config.awsRegion });
+/** Pure grouping of flat article rows into issues -- no network access, so
+ * it's unit-testable directly. Rows are expected newest-issue-first (see
+ * the ORDER BY in getBrowseIndex); a Map preserves that insertion order,
+ * so no separate sort is needed here.
+ */
+export function groupIntoIssues(rows: ArticleRow[]): BrowseIssue[] {
+  const byMonth = new Map<string, BrowseIssue>();
+
+  for (const row of rows) {
+    let issue = byMonth.get(row.issueMonth);
+    if (!issue) {
+      issue = {
+        year: row.issueYear,
+        month: Number(row.issueMonth.split("-")[1]),
+        issueMonth: row.issueMonth,
+        label: formatIssueMonth(row.issueMonth),
+        articles: [],
+      };
+      byMonth.set(row.issueMonth, issue);
+    }
+    issue.articles.push({
+      id: row.id,
+      title: row.articleTitle,
+      sourceUrl: row.sourceUrl ?? "",
+    });
+  }
+
+  return Array.from(byMonth.values());
 }
 
 /** Returns an empty index if nothing has been ingested yet, rather than
- * failing the whole browse page -- this is expected before Phase 1 has run
- * against real data.
+ * failing the whole browse page -- the archive is genuinely empty before
+ * Phase 2 has run against real data.
  */
-export async function getBrowseIndex(client: S3Client = buildClient()): Promise<BrowseIndex> {
-  try {
-    const response = await client.send(
-      new GetObjectCommand({ Bucket: config.s3Bucket, Key: BROWSE_INDEX_KEY })
-    );
-    const body = await response.Body?.transformToString();
-    if (!body) return EMPTY_INDEX;
-    return JSON.parse(body) as BrowseIndex;
-  } catch (error) {
-    if (error instanceof NoSuchKey) return EMPTY_INDEX;
-    throw error;
-  }
+export async function getBrowseIndex(
+  client?: NeonQueryFunction<false, false>
+): Promise<BrowseIndex> {
+  const sql = client ?? getDb();
+
+  const rows = (await sql`
+    select
+      a.id,
+      a.issue_month as "issueMonth",
+      a.issue_year as "issueYear",
+      a.article_title as "articleTitle",
+      a.source_url as "sourceUrl"
+    from articles a
+    order by a.issue_month desc, a.article_title asc
+  `) as ArticleRow[];
+
+  return { issues: groupIntoIssues(rows) };
 }

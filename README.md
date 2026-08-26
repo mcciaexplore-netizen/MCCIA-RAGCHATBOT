@@ -29,7 +29,7 @@ Being built phase by phase:
       `web/src/lib/retrieval.ts`
 - [x] **Phase 4: Answer generation with citations** --
       `web/src/lib/gemini/embed.ts`, `web/src/lib/gemini/generate-answer.ts`
-- [ ] Phase 5: Chat UI (`web/`)
+- [x] **Phase 5: Chat UI** -- `web/` rewired to the Gemini + Neon backend
 - [ ] Phase 6: Keep it current (scheduled re-ingestion)
 
 An earlier AWS/Bedrock version of this pipeline is archived in
@@ -121,8 +121,7 @@ schema has no `topic_tags` column -- confirmed with the user to store only
 
 Lives in `web/` (TypeScript), not `ingest/` (Python) -- this is runtime
 query-serving logic that Next.js API routes call on every question, not a
-batch ingestion step. Not wired into `api/chat/route.ts` yet (still calling
-the Bedrock version) -- that swap is Phase 5.
+batch ingestion step. Wired into `api/chat/route.ts` as of Phase 5.
 
 - `web/src/lib/gemini/query-router.ts` -- `classifyQuery(question)` sends the
   question to `gemini-3.5-flash-lite` with a small classification prompt
@@ -152,7 +151,6 @@ not Python's `google-genai`; confirmed the `interactions.create` /
 ## Phase 4: Answer generation with citations
 
 Also `web/` (TypeScript) -- the same runtime query-serving path as Phase 3.
-Not wired into `api/chat/route.ts` yet (Phase 5).
 
 - `web/src/lib/gemini/embed.ts` -- `embedQuery()` is Phase 4 step 1: embeds
   the question with `RETRIEVAL_QUERY` (chunks were indexed with
@@ -174,9 +172,9 @@ Not wired into `api/chat/route.ts` yet (Phase 5).
   excerpts; nothing in the code tries to detect that case.
 
 **Not yet verified against the acceptance tests** (no real Gemini/Neon
-credentials or ingested data in this environment) -- once Phase 5 wires this
-into the UI and there's real content in Postgres, worth running the spec's
-three acceptance questions for real:
+credentials or ingested data in this environment) -- now that Phase 5 has
+wired this into the UI, once there's real content in Postgres it's worth
+running the spec's three acceptance questions for real:
 1. "What was in the June 2021 issue of Sampada?" -- issue-scoped, cites only
    that issue.
 2. "What did MCCIA do during COVID to help people?" -- open search, cites
@@ -199,20 +197,46 @@ client), Postgres writes and resumability (fake connection), the
 mcciapunesampada.com feed parsing, and an end-to-end `process` run against a
 synthetic PDF with Gemini and Postgres both stubbed.
 
-Web: 69 tests, including Phase 3's classification parsing/fallback behavior,
+Web: 54 tests, including Phase 3's classification parsing/fallback behavior,
 `search()`'s query shape (issue filter present/absent, vector literal
 formatting, the chunks-join-articles select list, default vs. caller-supplied
 limit), Phase 4's query embedding (task type, normalization) and answer
 generation (context labeling, citation building/deduping, the empty-search
-short circuit) -- all against fake `interactions.create`/`embedContent`/
-tagged-template clients, no real Gemini or Neon calls.
+short circuit), and Phase 5's Postgres-backed archive grouping (`api/chat`'s
+route test now mocks `lib/gemini/*` instead of `lib/bedrock/*`) -- all
+against fake `interactions.create`/`embedContent`/tagged-template clients,
+no real Gemini or Neon calls.
 
 None of this has been run against real Gemini or Neon credentials yet (none
 are configured in this environment) -- worth a manual dry run against a
 single real issue before pointing this at the full 70-year archive.
 
-## Web app
+## Phase 5: Chat UI
 
-`web/` is the existing Next.js chat UI -- its MCCIA-branded design (logo,
-brand colors, layout) stays as built. Phase 5 only rewires its API routes
-from Bedrock to the new Gemini + Neon retrieval layer.
+`web/` is the existing Next.js chat UI -- its MCCIA-branded design (real
+logo, brand colors matching mcciapune.com, layout, copy) stays exactly as
+built; per the original spec's forest-green/amber/"no blue"/DM Serif Display
+branding would have reverted that work, so Phase 5 was scoped to the data
+layer only, confirmed with the user rather than guessed.
+
+- `api/chat/route.ts` now imports `classifyQuery`/`generateAnswer` from
+  `lib/gemini/` instead of `lib/bedrock/` -- the only change the route
+  itself needed, since both modules were built to the same
+  `(question, route) -> {answer, citations}` shape.
+- `lib/archive-index.ts` -- the archive browse page's data source, rewired
+  from an S3 JSON index to a live query against `articles` (grouped into
+  issues client-side by `groupIntoIssues()`). Same `getBrowseIndex()` return
+  shape as before, so `app/archive/page.tsx` and `ArchiveBrowser.tsx` needed
+  no changes beyond swapping `BrowseArticle.slug` (a file-path artifact from
+  the old S3 layout, meaningless in the new schema) for the article's real
+  Postgres `id`.
+- `lib/config.ts` dropped the now-unused `awsRegion`/`bedrockModelArn`/
+  `knowledgeBaseId`/`s3Bucket` getters; `package.json` dropped the `@aws-sdk/*`
+  dependencies entirely -- nothing in `web/` calls AWS anymore.
+- The old `lib/bedrock/` modules moved to `aws-legacy/web-bedrock/` (same
+  archive-don't-delete treatment as Phases 1-2's AWS pipeline).
+
+Verified by hitting the running dev server without any real credentials
+configured: both `/archive` and `POST /api/chat` fail exactly where
+expected (`DATABASE_URL is not set` / a caught, generic 500), confirming the
+new code path is actually reached end-to-end rather than just type-checking.

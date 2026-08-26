@@ -27,7 +27,8 @@ Being built phase by phase:
       Gemini article splitting, chunking + embedding, Postgres writes)
 - [x] **Phase 3: Query routing** -- `web/src/lib/gemini/query-router.ts`,
       `web/src/lib/retrieval.ts`
-- [ ] Phase 4: Answer generation with citations
+- [x] **Phase 4: Answer generation with citations** --
+      `web/src/lib/gemini/embed.ts`, `web/src/lib/gemini/generate-answer.ts`
 - [ ] Phase 5: Chat UI (`web/`)
 - [ ] Phase 6: Keep it current (scheduled re-ingestion)
 
@@ -148,6 +149,41 @@ not Python's `google-genai`; confirmed the `interactions.create` /
 `models.embedContent` param shapes against the installed package's own
 `.d.ts` files, not just the docs prose).
 
+## Phase 4: Answer generation with citations
+
+Also `web/` (TypeScript) -- the same runtime query-serving path as Phase 3.
+Not wired into `api/chat/route.ts` yet (Phase 5).
+
+- `web/src/lib/gemini/embed.ts` -- `embedQuery()` is Phase 4 step 1: embeds
+  the question with `RETRIEVAL_QUERY` (chunks were indexed with
+  `RETRIEVAL_DOCUMENT` -- Gemini's retrieval embeddings are asymmetric, so
+  the two sides must use the matching task type to compare meaningfully).
+- `web/src/lib/gemini/generate-answer.ts` -- `generateAnswer(question, route)`
+  chains it together: embed -> `search()` (Phase 3) -> label each chunk
+  `Sampada, <Month Year>, "<Article Title>"` so Gemini can attribute
+  correctly (step 2) -> `gemini-3.7-flash` generates from that context ->
+  citations are built from the SQL rows via `buildCitations()`, not parsed
+  back out of the model's own text (step 3, deduped since multiple chunks
+  from one article commonly land in the same result set). A route whose
+  search comes back empty (e.g. an issue-scoped question for a month with no
+  ingested articles yet) returns a plain "couldn't find anything" answer
+  without spending a generation call.
+- The system prompt (`SYSTEM_PROMPT`, matches the spec verbatim) is what
+  actually satisfies acceptance test 3 ("archive doesn't cover this ->
+  say so, don't invent") -- Gemini itself judges relevance from the labeled
+  excerpts; nothing in the code tries to detect that case.
+
+**Not yet verified against the acceptance tests** (no real Gemini/Neon
+credentials or ingested data in this environment) -- once Phase 5 wires this
+into the UI and there's real content in Postgres, worth running the spec's
+three acceptance questions for real:
+1. "What was in the June 2021 issue of Sampada?" -- issue-scoped, cites only
+   that issue.
+2. "What did MCCIA do during COVID to help people?" -- open search, cites
+   the specific issue/article per point.
+3. A genuinely uncovered question -- plain "not found," not an invented
+   answer.
+
 ## Tests
 
 ```bash
@@ -163,11 +199,13 @@ client), Postgres writes and resumability (fake connection), the
 mcciapunesampada.com feed parsing, and an end-to-end `process` run against a
 synthetic PDF with Gemini and Postgres both stubbed.
 
-Web: 57 tests, including Phase 3's classification parsing/fallback behavior
-and `search()`'s query shape (issue filter present/absent, vector literal
+Web: 69 tests, including Phase 3's classification parsing/fallback behavior,
+`search()`'s query shape (issue filter present/absent, vector literal
 formatting, the chunks-join-articles select list, default vs. caller-supplied
-limit) -- all against a fake `interactions.create`/tagged-template client,
-no real Gemini or Neon calls.
+limit), Phase 4's query embedding (task type, normalization) and answer
+generation (context labeling, citation building/deduping, the empty-search
+short circuit) -- all against fake `interactions.create`/`embedContent`/
+tagged-template clients, no real Gemini or Neon calls.
 
 None of this has been run against real Gemini or Neon credentials yet (none
 are configured in this environment) -- worth a manual dry run against a

@@ -14,6 +14,7 @@ from pathlib import Path
 GEMINI_SPLIT_MODEL = "gemini-3.7-flash"
 GEMINI_CLASSIFY_MODEL = "gemini-3.5-flash-lite"
 GEMINI_EMBED_MODEL = "gemini-embedding-001"
+GEMINI_OCR_MODEL = "gemini-3.7-flash"
 
 # pgvector's HNSW/IVFFlat indexes cap at 2000 dims -- gemini-embedding-001
 # defaults to 3072, so this must be requested explicitly (see db/schema.sql).
@@ -21,6 +22,12 @@ EMBEDDING_DIMENSIONS = 1536
 
 CHUNK_TARGET_TOKENS = 300
 CHUNK_OVERLAP_TOKENS = 50
+
+# Real Sampada scans have no trustworthy text layer (see extract_text.py), so
+# pages are OCR'd via Gemini vision, several pages per call. Small enough
+# that a retry after a malformed response doesn't waste too much OCR work.
+OCR_PAGE_BATCH_SIZE = 6
+OCR_PAGE_DPI = 200
 
 
 def _env(name: str, default: str = "") -> str:

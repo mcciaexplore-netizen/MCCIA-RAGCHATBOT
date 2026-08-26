@@ -47,7 +47,8 @@ def _match_to_year_month(m: re.Match) -> Optional[Tuple[int, int]]:
         month = MONTHS.get(groups["mon"].lower())
     if month is None or not (1 <= month <= 12):
         return None
-    if not (1950 <= year <= 2100):
+    # The Sampada archive itself runs from 1945 -- don't reject real issues.
+    if not (1900 <= year <= 2100):
         return None
     return year, month
 

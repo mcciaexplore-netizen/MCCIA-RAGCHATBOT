@@ -14,9 +14,16 @@ from ingest.embeddings import embed_texts
 from ingest.split_articles import Article
 
 
-def already_ingested(conn: psycopg.Connection, drive_file_id: str) -> bool:
+def already_ingested(conn: psycopg.Connection, drive_file_id: str, issue_month: str) -> bool:
+    """A single PDF can bundle several issues (see extract_text.py), so
+    resumability is keyed on (drive_file_id, issue_month), not just the
+    file -- otherwise ingesting one issue from a PDF would make every other
+    issue still bundled in that same file look "already done"."""
     with conn.cursor() as cur:
-        cur.execute("select 1 from articles where drive_file_id = %s limit 1", (drive_file_id,))
+        cur.execute(
+            "select 1 from articles where drive_file_id = %s and issue_month = %s limit 1",
+            (drive_file_id, issue_month),
+        )
         return cur.fetchone() is not None
 
 

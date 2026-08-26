@@ -6,19 +6,9 @@ they need real credentials.
 
 from unittest.mock import patch
 
-import pymupdf
-
+from ingest.detect_issue_boundaries import IssueBoundary, IssueBoundaryError
 from ingest.run_pipeline import cmd_all, cmd_check_web, cmd_process
-from ingest.split_articles import Article
-
-
-def _make_pdf(path, pages_text):
-    doc = pymupdf.open()
-    for text in pages_text:
-        page = doc.new_page()
-        page.insert_text((72, 100), text)
-    doc.save(path)
-    doc.close()
+from ingest.split_articles import Article, ArticleSplitError
 
 
 class _Args:
@@ -39,12 +29,13 @@ class _FakeCursor:
         sql_norm = sql.strip()
         self._conn.executed.append((sql_norm, params))
         if "select 1 from articles" in sql_norm:
-            self._conn.next_fetchone = (1,) if params[0] in self._conn.existing_drive_ids else None
+            key = (params[0], params[1])
+            self._conn.next_fetchone = (1,) if key in self._conn.existing_keys else None
         elif "insert into articles" in sql_norm:
             self._conn.next_id += 1
             self._conn.next_fetchone = (self._conn.next_id,)
         elif "delete from articles" in sql_norm:
-            self._conn.existing_drive_ids.discard(params[0])
+            self._conn.existing_keys.discard((params[0], params[1]))
 
     def executemany(self, sql, seq_of_params):
         self._conn.executed.append((sql.strip(), list(seq_of_params)))
@@ -57,11 +48,11 @@ class _FakeCursor:
 
 
 class _FakeConnection:
-    def __init__(self, existing_drive_ids=(), ingested_months=()):
+    def __init__(self, existing_keys=(), ingested_months=()):
         self.executed = []
         self.next_id = 0
         self.next_fetchone = None
-        self.existing_drive_ids = set(existing_drive_ids)
+        self.existing_keys = set(existing_keys)  # {(drive_file_id, issue_month)}
         self.ingested_months = set(ingested_months)
         self.commits = 0
         self.rollbacks = 0
@@ -79,36 +70,41 @@ class _FakeConnection:
         pass
 
 
-def _patched(fake_conn, articles, new_web_issues=()):
+def _patched(fake_conn, issues, new_web_issues=(), pages=("page one",)):
+    """`issues` is a list of (IssueBoundary, page_texts, articles-or-exception)
+    tuples -- one per issue that split_into_issues() should hand back for
+    this PDF. split_issue_into_articles() is driven by a side_effect so each
+    detected issue can return its own articles (or raise)."""
+    boundaries_and_pages = [(boundary, issue_pages) for boundary, issue_pages, _ in issues]
+    split_effects = [
+        articles_or_exc for _, _, articles_or_exc in issues
+    ]
+
     return (
         patch("ingest.run_pipeline.connect", return_value=fake_conn),
-        patch("ingest.run_pipeline.split_issue_into_articles", return_value=articles),
+        patch("ingest.run_pipeline.split_into_issues", return_value=boundaries_and_pages),
+        patch("ingest.run_pipeline.split_issue_into_articles", side_effect=split_effects),
         patch("ingest.run_pipeline.lookup_source_url", return_value=None),
         patch("ingest.db_writer.embed_texts", return_value=[[0.0] * 1536]),
         patch("ingest.run_pipeline.check_for_new_issues", return_value=list(new_web_issues)),
+        patch("ingest.run_pipeline.extract_pages", return_value=list(pages)),
     )
 
 
-def test_process_writes_dated_articles_from_synthetic_pdf(tmp_path, monkeypatch):
+def test_process_writes_articles_for_a_single_detected_issue(tmp_path, monkeypatch):
     staging = tmp_path / "raw"
     staging.mkdir()
     monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
     monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
-
-    _make_pdf(
-        staging / "Sampada_June_2021.pdf",
-        [
-            "SAMPADA\nJune 2021",
-            "Editorial\nBy The Editor\nWelcome to this special issue on robotics.",
-        ],
-    )
+    (staging / "Sampada_June_2021.pdf").write_bytes(b"")
     (staging / ".drive_ids.json").write_text('{"Sampada_June_2021.pdf": "drive-abc123"}')
 
     fake_conn = _FakeConnection()
-    fake_articles = [Article(title="Editorial", author="The Editor", body="Welcome to this special issue on robotics.")]
+    boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    articles = [Article(title="Editorial", author="The Editor", body="Welcome to this special issue.")]
 
-    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
-    with p1, p2, p3, p4, p5:
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_Args())
 
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
@@ -121,71 +117,133 @@ def test_process_writes_dated_articles_from_synthetic_pdf(tmp_path, monkeypatch)
     assert fake_conn.commits == 1
 
 
-def test_process_logs_manual_review_when_date_undetectable(tmp_path, monkeypatch):
+def test_process_writes_every_issue_bundled_in_one_pdf(tmp_path, monkeypatch):
+    # The real archive: one PDF routinely bundles multiple issues (e.g. a
+    # 1945 file bundling a July 1945 issue and a Dec-Jan 1946 issue). Each
+    # detected issue should get its own articles under its own issue_month.
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "1945 July.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"1945 July.pdf": "drive-bound-vol"}')
+
+    fake_conn = _FakeConnection()
+    issue_one = (
+        IssueBoundary(start_page=0, year=1945, month=7),
+        ["cover 1", "body 1"],
+        [Article(title="News Roundup", author="", body="July news.")],
+    )
+    issue_two = (
+        IssueBoundary(start_page=2, year=1946, month=1),
+        ["cover 2", "body 2"],
+        [Article(title="Year End Report", author="", body="Jan news.")],
+    )
+
+    patches = _patched(fake_conn, issues=[issue_one, issue_two])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        cmd_process(_Args())
+
+    insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
+    assert len(insert_calls) == 2
+    issue_months = {params[0] for _, params in insert_calls}
+    assert issue_months == {"1945-07", "1946-01"}
+    assert fake_conn.commits == 2  # one commit per issue, not one for the whole PDF
+
+
+def test_process_one_bad_issue_does_not_block_the_others_in_the_same_pdf(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "bound.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"bound.pdf": "drive-bound"}')
+
+    fake_conn = _FakeConnection()
+    good_issue = (
+        IssueBoundary(start_page=0, year=1945, month=7),
+        ["cover 1", "body 1"],
+        [Article(title="News Roundup", author="", body="July news.")],
+    )
+    bad_issue = (
+        IssueBoundary(start_page=2, year=1946, month=1),
+        ["cover 2", "body 2"],
+        ArticleSplitError("Gemini returned malformed article boundaries twice"),
+    )
+
+    patches = _patched(fake_conn, issues=[good_issue, bad_issue])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        cmd_process(_Args())
+
+    insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
+    assert len(insert_calls) == 1
+    assert insert_calls[0][1][0] == "1945-07"
+
+
+def test_process_logs_manual_review_when_issue_boundaries_undetectable(tmp_path, monkeypatch):
     staging = tmp_path / "raw"
     staging.mkdir()
     review_log = tmp_path / "manual_review.csv"
     monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
     monkeypatch.setenv("MANUAL_REVIEW_LOG", str(review_log))
-
-    _make_pdf(staging / "scan_final_v2.pdf", ["no date anywhere on this cover"])
+    (staging / "scan_final_v2.pdf").write_bytes(b"")
     (staging / ".drive_ids.json").write_text('{"scan_final_v2.pdf": "drive-xyz"}')
 
     fake_conn = _FakeConnection()
-    p1, p2, p3, p4, p5 = _patched(fake_conn, [])
-    with p1, p2 as fake_split, p3, p4, p5:
+    patches = list(_patched(fake_conn, issues=[]))
+    patches[1] = patch("ingest.run_pipeline.split_into_issues", side_effect=IssueBoundaryError("no cover pages found"))
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_Args())
-        fake_split.assert_not_called()
 
     assert review_log.exists()
     assert "scan_final_v2.pdf" in review_log.read_text()
-    # The resumability check (a SELECT) runs before date detection, but
-    # nothing should ever get written for a PDF whose date we can't trust.
     assert not any("insert into articles" in e[0] for e in fake_conn.executed)
     assert fake_conn.commits == 0
 
 
-def test_process_skips_pdf_already_in_database(tmp_path, monkeypatch):
+def test_process_skips_an_issue_already_in_the_database(tmp_path, monkeypatch):
     staging = tmp_path / "raw"
     staging.mkdir()
     monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
     monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
-
-    _make_pdf(staging / "2019-03.pdf", ["Editorial\nBy Someone\nBody text here."])
+    (staging / "2019-03.pdf").write_bytes(b"")
     (staging / ".drive_ids.json").write_text('{"2019-03.pdf": "drive-already-here"}')
 
-    fake_conn = _FakeConnection(existing_drive_ids={"drive-already-here"})
-    fake_articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
+    fake_conn = _FakeConnection(existing_keys={("drive-already-here", "2019-03")})
+    boundary = IssueBoundary(start_page=0, year=2019, month=3)
+    articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
 
-    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
-    with p1, p2 as fake_split, p3, p4, p5:
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    with patches[0], patches[1], patches[2] as fake_split, patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_Args())
         fake_split.assert_not_called()
 
     assert not any("insert into articles" in e[0] for e in fake_conn.executed)
 
 
-def test_process_force_reprocesses_and_deletes_old_rows(tmp_path, monkeypatch):
+def test_process_force_reprocesses_and_deletes_only_that_issue(tmp_path, monkeypatch):
     staging = tmp_path / "raw"
     staging.mkdir()
     monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
     monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
-
-    _make_pdf(staging / "2019-03.pdf", ["Editorial\nBy Someone\nBody text here."])
+    (staging / "2019-03.pdf").write_bytes(b"")
     (staging / ".drive_ids.json").write_text('{"2019-03.pdf": "drive-already-here"}')
 
-    fake_conn = _FakeConnection(existing_drive_ids={"drive-already-here"})
-    fake_articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
+    fake_conn = _FakeConnection(existing_keys={("drive-already-here", "2019-03")})
+    boundary = IssueBoundary(start_page=0, year=2019, month=3)
+    articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
 
     class _ForceArgs:
         force = True
 
-    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
-    with p1, p2 as fake_split, p3, p4, p5:
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    with patches[0], patches[1], patches[2] as fake_split, patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_ForceArgs())
         fake_split.assert_called_once()
 
-    assert any("delete from articles" in e[0] for e in fake_conn.executed)
+    delete_calls = [e for e in fake_conn.executed if "delete from articles" in e[0]]
+    assert len(delete_calls) == 1
+    assert delete_calls[0][1] == ("drive-already-here", "2019-03")
     assert any("insert into articles" in e[0] for e in fake_conn.executed)
 
 
@@ -194,13 +252,12 @@ def test_process_skips_pdf_with_no_drive_id_on_record(tmp_path, monkeypatch):
     staging.mkdir()
     monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
     monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
-
-    _make_pdf(staging / "untracked.pdf", ["Editorial\nBy Someone\nJune 2021 body text."])
+    (staging / "untracked.pdf").write_bytes(b"")
     # No .drive_ids.json at all -- sync was never run.
 
     fake_conn = _FakeConnection()
-    p1, p2, p3, p4, p5 = _patched(fake_conn, [])
-    with p1, p2 as fake_split, p3, p4, p5:
+    patches = _patched(fake_conn, issues=[])
+    with patches[0], patches[1], patches[2] as fake_split, patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_Args())
         fake_split.assert_not_called()
 
@@ -212,8 +269,8 @@ def test_check_web_passes_ingested_months_from_the_database(tmp_path, monkeypatc
     monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
 
     fake_conn = _FakeConnection(ingested_months={"2021-06", "2021-07"})
-    p1, p2, p3, p4, p5 = _patched(fake_conn, [])
-    with p1, p2, p3, p4, p5 as fake_check:
+    patches = _patched(fake_conn, issues=[])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as fake_check, patches[6]:
         cmd_check_web(_Args())
 
     fake_check.assert_called_once_with({"2021-06", "2021-07"})
@@ -225,15 +282,15 @@ def test_all_runs_sync_process_and_check_web_in_order(tmp_path, monkeypatch):
     staging.mkdir()
     monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
     monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
-
-    _make_pdf(staging / "2021-06.pdf", ["Editorial\nBy Someone\nBody text here."])
+    (staging / "2021-06.pdf").write_bytes(b"")
     (staging / ".drive_ids.json").write_text('{"2021-06.pdf": "drive-abc"}')
 
     fake_conn = _FakeConnection()
-    fake_articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
+    boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
 
-    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
-    with p1, p2, p3, p4, p5 as fake_check, patch(
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as fake_check, patches[6], patch(
         "ingest.run_pipeline.sync_all", return_value=[]
     ) as fake_sync:
         cmd_all(_Args())

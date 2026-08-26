@@ -21,7 +21,8 @@ class _FakeCursor:
     def execute(self, sql, params=None):
         self._conn.executed.append((sql.strip(), params))
         if "select 1 from articles" in sql:
-            self._conn.next_fetchone = (1,) if params[0] in self._conn.existing_drive_ids else None
+            key = (params[0], params[1])
+            self._conn.next_fetchone = (1,) if key in self._conn.existing_drive_ids else None
         elif "insert into articles" in sql:
             self._conn.next_id += 1
             self._conn.last_inserted_id = self._conn.next_id
@@ -51,14 +52,21 @@ class _FakeConnection:
         self.committed = True
 
 
-def test_already_ingested_true_when_drive_id_present():
-    conn = _FakeConnection(existing_drive_ids={"abc123"})
-    assert already_ingested(conn, "abc123") is True
+def test_already_ingested_true_when_drive_id_and_issue_month_present():
+    conn = _FakeConnection(existing_drive_ids={("abc123", "2021-06")})
+    assert already_ingested(conn, "abc123", "2021-06") is True
 
 
 def test_already_ingested_false_when_drive_id_absent():
-    conn = _FakeConnection(existing_drive_ids={"abc123"})
-    assert already_ingested(conn, "not-there") is False
+    conn = _FakeConnection(existing_drive_ids={("abc123", "2021-06")})
+    assert already_ingested(conn, "not-there", "2021-06") is False
+
+
+def test_already_ingested_false_for_a_different_issue_bundled_in_the_same_pdf():
+    # One PDF can bundle several issues -- ingesting one shouldn't make a
+    # different issue_month bundled in that same file look already-done.
+    conn = _FakeConnection(existing_drive_ids={("abc123", "2021-06")})
+    assert already_ingested(conn, "abc123", "2021-07") is False
 
 
 class _DistinctMonthsCursor:

@@ -28,3 +28,10 @@ def test_unparseable_returns_none():
 
 def test_rejects_out_of_range_year():
     assert detect_issue_date("photo_2150_vacation.pdf", "") == (None, None)
+
+
+def test_accepts_years_from_the_archives_actual_start():
+    # The real Sampada archive starts in 1945 -- these must not be rejected
+    # as "too old" the way a stray unrelated year might be.
+    assert detect_issue_date("1945 July.pdf", "") == (1945, 7)
+    assert detect_issue_date("1949 April.pdf", "") == (1949, 4)

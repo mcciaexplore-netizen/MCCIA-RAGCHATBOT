@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { search, type SearchResult } from "../retrieval";
 
 const SAMPLE_ROW: SearchResult = {
+  articleId: 1,
   content: "MCCIA ran robotics workshops across Pune.",
   issueMonth: "2021-06",
   articleTitle: "Robotics for Everyone",
@@ -44,10 +45,11 @@ describe("search", () => {
     expect(calls[0].values).toContain("[0.1,0.25,-0.5]");
   });
 
-  it("joins chunks to articles so every row carries issue_month and article_title", async () => {
+  it("joins chunks to articles so every row carries the article id, issue_month, and article_title", async () => {
     const { sql, calls } = fakeSql([]);
     await search([0.1], { scope: "open" }, { client: sql });
     expect(calls[0].text).toContain("join articles a on a.id = c.article_id");
+    expect(calls[0].text).toContain('"articleId"');
     expect(calls[0].text).toContain('"issueMonth"');
     expect(calls[0].text).toContain('"articleTitle"');
   });

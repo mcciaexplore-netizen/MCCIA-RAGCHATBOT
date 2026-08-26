@@ -29,7 +29,7 @@ describe("ChatInterface", () => {
   it("sends the typed question, then renders the answer and its citations", async () => {
     const response: ChatApiResponse = {
       answer: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
-      citations: [{ articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "" }],
+      citations: [{ articleId: 1, articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "" }],
       scope: "issue",
       issueMonth: "2021-06",
     };

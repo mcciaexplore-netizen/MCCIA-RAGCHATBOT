@@ -44,14 +44,14 @@ export function formatContext(chunks: SearchResult[]): string {
  * land in one result set.
  */
 export function buildCitations(chunks: SearchResult[]): ParsedCitation[] {
-  const seen = new Set<string>();
+  const seen = new Set<number>();
   const citations: ParsedCitation[] = [];
 
   for (const chunk of chunks) {
-    const key = `${chunk.issueMonth}::${chunk.articleTitle}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(chunk.articleId)) continue;
+    seen.add(chunk.articleId);
     citations.push({
+      articleId: chunk.articleId,
       articleTitle: chunk.articleTitle,
       issueMonth: chunk.issueMonth,
       sourceUrl: chunk.sourceUrl ?? "",

@@ -8,6 +8,7 @@ import {
 import type { SearchResult } from "@/lib/retrieval";
 
 const EDITORIAL: SearchResult = {
+  articleId: 1,
   content: "MCCIA ran robotics workshops across Pune.",
   issueMonth: "2021-06",
   articleTitle: "Editorial",
@@ -20,6 +21,7 @@ const SECOND_CHUNK_SAME_ARTICLE: SearchResult = {
 };
 
 const COVID_RELIEF: SearchResult = {
+  articleId: 2,
   content: "MCCIA distributed oxygen concentrators.",
   issueMonth: "2020-05",
   articleTitle: "COVID Relief in Pune",
@@ -45,11 +47,12 @@ describe("buildCitations", () => {
     const citations = buildCitations([EDITORIAL, COVID_RELIEF]);
     expect(citations).toEqual([
       {
+        articleId: 1,
         articleTitle: "Editorial",
         issueMonth: "2021-06",
         sourceUrl: "https://www.mcciapunesampada.com/p/sampada-june-2021.html",
       },
-      { articleTitle: "COVID Relief in Pune", issueMonth: "2020-05", sourceUrl: "" },
+      { articleId: 2, articleTitle: "COVID Relief in Pune", issueMonth: "2020-05", sourceUrl: "" },
     ]);
   });
 
@@ -110,6 +113,7 @@ describe("generateAnswer", () => {
     expect(result.answer).toContain("robotics workshops");
     expect(result.citations).toEqual([
       {
+        articleId: 1,
         articleTitle: "Editorial",
         issueMonth: "2021-06",
         sourceUrl: "https://www.mcciapunesampada.com/p/sampada-june-2021.html",

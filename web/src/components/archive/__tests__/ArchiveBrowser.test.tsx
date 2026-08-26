@@ -43,20 +43,30 @@ describe("ArchiveBrowser", () => {
     expect(screen.getByText("COVID Relief")).toBeInTheDocument();
   });
 
-  it("links an article to its source url when present", () => {
+  it("always links an article's title to its transcription page", () => {
     render(<ArchiveBrowser issues={ISSUES} />);
-    const link = screen.getByRole("link", { name: "Women in Robotics" });
-    expect(link).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Editorial" })).toHaveAttribute("href", "/archive/1");
+    expect(screen.getByRole("link", { name: "Women in Robotics" })).toHaveAttribute(
+      "href",
+      "/archive/2"
+    );
+  });
+
+  it("also shows an external link when a source url is present", () => {
+    render(<ArchiveBrowser issues={ISSUES} />);
+    const externalLink = screen.getByTitle("Read the original on mcciapunesampada.com");
+    expect(externalLink).toHaveAttribute(
       "href",
       "https://mcciapunesampada.com/2021/06/women-in-robotics.html"
     );
-    expect(link).toHaveAttribute("target", "_blank");
+    expect(externalLink).toHaveAttribute("target", "_blank");
   });
 
-  it("renders an article with no source url as plain text, not a link", () => {
+  it("omits the external link for articles with no source url", () => {
+    // Of the 3 fixture articles, only "Women in Robotics" has a source_url --
+    // exactly one external link should exist, not one per article.
     render(<ArchiveBrowser issues={ISSUES} />);
-    expect(screen.queryByRole("link", { name: "Editorial" })).not.toBeInTheDocument();
-    expect(screen.getByText("Editorial")).toBeInTheDocument();
+    expect(screen.getAllByTitle("Read the original on mcciapunesampada.com")).toHaveLength(1);
   });
 
   it("filters to one year when its pill is clicked", async () => {

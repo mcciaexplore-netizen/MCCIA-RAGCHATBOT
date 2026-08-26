@@ -10,6 +10,7 @@ import type { QueryRoute } from "@/lib/gemini/query-router";
 // Phase 4 (it's the first step of answer generation); this is `search()`.
 
 export type SearchResult = {
+  articleId: number;
   content: string;
   issueMonth: string;
   articleTitle: string;
@@ -36,6 +37,7 @@ export async function search(
     route.scope === "issue"
       ? await sql`
           select
+            a.id as "articleId",
             c.content,
             a.issue_month as "issueMonth",
             a.article_title as "articleTitle",
@@ -48,6 +50,7 @@ export async function search(
         `
       : await sql`
           select
+            a.id as "articleId",
             c.content,
             a.issue_month as "issueMonth",
             a.article_title as "articleTitle",

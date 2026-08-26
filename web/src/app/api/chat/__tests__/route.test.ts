@@ -29,7 +29,7 @@ describe("POST /api/chat", () => {
     vi.mocked(classifyQuery).mockResolvedValue({ scope: "issue", issueMonth: "2021-06" });
     vi.mocked(generateAnswer).mockResolvedValue({
       answer: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
-      citations: [{ articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "" }],
+      citations: [{ articleId: 1, articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "" }],
     });
 
     const response = await POST(jsonRequest({ question: "What was in the June 2021 issue?" }));

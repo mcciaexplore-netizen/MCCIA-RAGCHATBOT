@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { BrowseIssue } from "@/lib/types";
 
@@ -46,18 +47,23 @@ export function ArchiveBrowser({ issues }: { issues: BrowseIssue[] }) {
             <h2 className="font-heading text-2xl text-brand-primary">{issue.label}</h2>
             <ul className="mt-2 flex flex-col gap-1">
               {issue.articles.map((article) => (
-                <li key={article.id}>
-                  {article.sourceUrl ? (
+                <li key={article.id} className="flex items-center gap-2">
+                  <Link
+                    href={`/archive/${article.id}`}
+                    className="text-brand-text hover:text-brand-primary hover:underline"
+                  >
+                    {article.title}
+                  </Link>
+                  {article.sourceUrl && (
                     <a
                       href={article.sourceUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-brand-text hover:text-brand-primary hover:underline"
+                      className="text-xs text-brand-text-muted hover:text-brand-primary"
+                      title="Read the original on mcciapunesampada.com"
                     >
-                      {article.title}
+                      ↗
                     </a>
-                  ) : (
-                    <span className="text-brand-text">{article.title}</span>
                   )}
                 </li>
               ))}

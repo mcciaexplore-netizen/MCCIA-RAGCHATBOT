@@ -3,6 +3,7 @@
 // to import from either side.
 
 export type ParsedCitation = {
+  articleId: number;
   articleTitle: string;
   issueMonth: string;
   sourceUrl: string;

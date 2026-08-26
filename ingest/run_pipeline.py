@@ -1,11 +1,13 @@
 """Orchestrates Phase 2 end to end: Drive sync -> extract -> detect date ->
-split (Gemini) -> chunk+embed (Gemini) -> write to Postgres.
+split (Gemini) -> chunk+embed (Gemini) -> write to Postgres. Also Phase 6's
+web-archive check (see cmd_check_web).
 
 Usage:
     python -m ingest.run_pipeline sync              # pull PDFs from Drive
     python -m ingest.run_pipeline process            # extract+split+embed+write
     python -m ingest.run_pipeline process --force    # reprocess even if already ingested
-    python -m ingest.run_pipeline all
+    python -m ingest.run_pipeline check-web          # log web issues not yet ingested
+    python -m ingest.run_pipeline all                # sync, process, check-web
 """
 
 import argparse
@@ -14,13 +16,13 @@ from pathlib import Path
 
 from db.connection import connect
 from ingest.config import local_staging_dir
-from ingest.db_writer import already_ingested, write_article
+from ingest.db_writer import already_ingested, ingested_issue_months, write_article
 from ingest.detect_issue_date import detect_issue_date
 from ingest.drive_sync import load_drive_ids, sync_all
 from ingest.extract_text import cover_text, extract_pages, full_text
 from ingest.manual_review import log_manual_review
 from ingest.split_articles import ArticleSplitError, split_issue_into_articles
-from ingest.web_archive import lookup_source_url
+from ingest.web_archive import check_for_new_issues, lookup_source_url
 
 
 def process_pdf(pdf_path: Path, drive_file_id: str, conn, force: bool = False) -> bool:
@@ -114,9 +116,22 @@ def cmd_process(args) -> None:
         conn.close()
 
 
+def cmd_check_web(_args) -> None:
+    conn = connect()
+    try:
+        months = ingested_issue_months(conn)
+    finally:
+        conn.close()
+
+    new_issues = check_for_new_issues(months)
+    if not new_issues:
+        print("[WEB CHECK] no issues found on the web archive that aren't already ingested")
+
+
 def cmd_all(args) -> None:
     cmd_sync(args)
     cmd_process(args)
+    cmd_check_web(args)
 
 
 def main() -> None:
@@ -130,7 +145,12 @@ def main() -> None:
     p_process.add_argument("--force", action="store_true", help="Reprocess even if already in the database")
     p_process.set_defaults(func=cmd_process)
 
-    p_all = sub.add_parser("all", help="sync, then process")
+    p_check_web = sub.add_parser(
+        "check-web", help="Log mcciapunesampada.com issues not yet in the database"
+    )
+    p_check_web.set_defaults(func=cmd_check_web)
+
+    p_all = sub.add_parser("all", help="sync, then process, then check-web")
     p_all.add_argument("--force", action="store_true")
     p_all.set_defaults(func=cmd_all)
 

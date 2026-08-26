@@ -17,7 +17,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from ingest.config import web_archive_base_url as _web_archive_base_url
 from ingest.detect_issue_date import detect_issue_date
@@ -94,3 +94,31 @@ def lookup_source_url(issue_month: str) -> Optional[str]:
     index = build_issue_month_index(parse_pages_feed(feed))
     issue = index.get(issue_month)
     return issue.url if issue else None
+
+
+def find_new_web_issues(ingested_months: Set[str], web_issues: List[WebIssue]) -> List[WebIssue]:
+    """Pure diff against whatever issue_months are already in Postgres."""
+    return [issue for issue in web_issues if issue.issue_month not in ingested_months]
+
+
+def check_for_new_issues(ingested_months: Set[str]) -> List[WebIssue]:
+    """Phase 6: supplementary signal that an issue is live on the web but we
+    don't have its PDF yet -- logs what it finds, doesn't scrape article
+    content or attempt ingestion from HTML (Drive PDFs stay the only
+    ingestion source). Best-effort like lookup_source_url: a network hiccup
+    here should never fail the scheduled job.
+    """
+    try:
+        feed = fetch_pages_feed()
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        print(f"[WEB CHECK] could not reach {_web_archive_base_url()}: {exc}")
+        return []
+
+    web_issues = parse_pages_feed(feed)
+    new_issues = find_new_web_issues(ingested_months, web_issues)
+    for issue in new_issues:
+        print(
+            f"[WEB CHECK] '{issue.title}' ({issue.issue_month}) is live at "
+            f"{issue.url} but not yet in our archive"
+        )
+    return new_issues

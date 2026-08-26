@@ -1,6 +1,8 @@
 from ingest.web_archive import (
     WebIssue,
     build_issue_month_index,
+    check_for_new_issues,
+    find_new_web_issues,
     lookup_source_url,
     parse_pages_feed,
 )
@@ -84,3 +86,36 @@ def test_lookup_source_url_survives_network_failure(monkeypatch):
     monkeypatch.setattr("ingest.web_archive.fetch_pages_feed", boom)
 
     assert lookup_source_url("2021-05") is None
+
+
+def test_find_new_web_issues_diffs_against_ingested_months():
+    issues = parse_pages_feed(SAMPLE_FEED)
+    ingested = {"2021-05"}
+
+    new = find_new_web_issues(ingested, issues)
+
+    assert [i.issue_month for i in new] == ["2026-07"]
+
+
+def test_find_new_web_issues_empty_when_everything_already_ingested():
+    issues = parse_pages_feed(SAMPLE_FEED)
+    ingested = {i.issue_month for i in issues}
+
+    assert find_new_web_issues(ingested, issues) == []
+
+
+def test_check_for_new_issues_survives_network_failure(monkeypatch):
+    def boom(*args, **kwargs):
+        raise TimeoutError("no network in this sandbox")
+
+    monkeypatch.setattr("ingest.web_archive.fetch_pages_feed", boom)
+
+    assert check_for_new_issues(set()) == []
+
+
+def test_check_for_new_issues_returns_new_ones(monkeypatch):
+    monkeypatch.setattr("ingest.web_archive.fetch_pages_feed", lambda: SAMPLE_FEED)
+
+    new = check_for_new_issues({"2021-05"})
+
+    assert [i.issue_month for i in new] == ["2026-07"]

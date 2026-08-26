@@ -30,7 +30,8 @@ Being built phase by phase:
 - [x] **Phase 4: Answer generation with citations** --
       `web/src/lib/gemini/embed.ts`, `web/src/lib/gemini/generate-answer.ts`
 - [x] **Phase 5: Chat UI** -- `web/` rewired to the Gemini + Neon backend
-- [ ] Phase 6: Keep it current (scheduled re-ingestion)
+- [x] **Phase 6: Keep it current** -- `.github/workflows/ingest.yml`,
+      `ingest/run_pipeline.py check-web`
 
 An earlier AWS/Bedrock version of this pipeline is archived in
 [aws-legacy/](aws-legacy/) -- never run against real credentials, superseded
@@ -185,17 +186,18 @@ running the spec's three acceptance questions for real:
 ## Tests
 
 ```bash
-python -m pytest      # ingestion (Phases 1-2)
-cd web && npm test    # web app, including Phases 3+ (Vitest)
+python -m pytest      # ingestion (Phases 1, 2, 6)
+cd web && npm test    # web app (Phases 3-5, Vitest)
 ```
 
-Python: 56 tests, covering the schema's structure (Phase 1), issue-date
+Python: 64 tests, covering the schema's structure (Phase 1), issue-date
 detection across filename/cover-text formats, PDF text extraction, article
 boundary slicing and Gemini response validation/retry (with a fake client,
 no real API calls), chunking, embedding batching/normalization (fake
 client), Postgres writes and resumability (fake connection), the
-mcciapunesampada.com feed parsing, and an end-to-end `process` run against a
-synthetic PDF with Gemini and Postgres both stubbed.
+mcciapunesampada.com feed parsing and new-issue diffing (Phases 2 and 6),
+and end-to-end `process`/`check-web`/`all` runs with Gemini and Postgres
+both stubbed.
 
 Web: 54 tests, including Phase 3's classification parsing/fallback behavior,
 `search()`'s query shape (issue filter present/absent, vector literal
@@ -240,3 +242,55 @@ Verified by hitting the running dev server without any real credentials
 configured: both `/archive` and `POST /api/chat` fail exactly where
 expected (`DATABASE_URL is not set` / a caught, generic 500), confirming the
 new code path is actually reached end-to-end rather than just type-checking.
+
+## Phase 6: Keep it current
+
+**GitHub Actions over the spec's Vercel Cron / n8n options.** Vercel Cron
+triggers a Next.js API route -- it fits a job written in TypeScript running
+inside the Vercel deployment, not a Python CLI script; using it here would
+mean either reimplementing all of `ingest/` in TypeScript (far beyond what
+this phase asks) or having it call out to somewhere else that actually runs
+Python, which is more moving parts for no benefit. n8n doesn't run Python
+natively either, and would need its own hosting decision. Since this repo
+is already on GitHub, a scheduled workflow needs no new service, no new
+account, and no new secret-management story -- it just runs the exact CLI
+already built for Phase 2, on a schedule. (Same kind of call the original
+AWS build made choosing EventBridge + Lambda over n8n, for the same
+reason: reuse what's already there instead of adding a service to host.)
+
+`.github/workflows/ingest.yml` -- weekly (Sampada is monthly; anything
+tighter is wasted API calls), plus `workflow_dispatch` for a manual run.
+Installs `requirements.txt`, writes the Drive service account key from a
+secret to `secrets/drive-service-account.json`, then runs
+`python -m ingest.run_pipeline all`. Caches `staging/` between runs
+(keyed on the run ID, falling back to the most recent prior entry) so
+`drive_sync.py`'s existing skip-if-same-size check actually has something
+to compare against -- without it, every run starts from an empty
+`staging/raw/` and re-downloads the whole 70-year archive from Drive every
+week just to skip re-processing all of it against Postgres.
+
+Needs these set as repo secrets (Settings -> Secrets and variables ->
+Actions): `GEMINI_API_KEY`, `DATABASE_URL`, `GOOGLE_DRIVE_FOLDER_ID`,
+`GOOGLE_SERVICE_ACCOUNT_JSON` (the *contents* of the service account JSON
+key file, not a path).
+
+`all` now runs a third step after sync/process: `ingest/run_pipeline.py
+check-web` (`ingest/web_archive.py`'s `check_for_new_issues`, deferred from
+Phase 2). It diffs mcciapunesampada.com's page feed against
+`ingested_issue_months()` (a `select distinct issue_month from articles`,
+not a local index file the way the archived build did it) and logs any
+issue that's live on the web but has no Drive PDF ingested yet -- matching
+the spec's framing exactly: a supplementary signal, not an ingestion path.
+It never scrapes article content or writes anything from the web archive;
+Drive PDFs stay the only source of truth.
+
+64 Python tests now (8 new): the diffing logic (`find_new_web_issues`,
+`check_for_new_issues`, both against a fake feed, no network),
+`ingested_issue_months()` (fake cursor), and `cmd_check_web`/`cmd_all`'s
+ordering (fake connection + mocked `check_for_new_issues`).
+
+**Not run for real** -- no GitHub remote, repo secrets, or scheduled trigger
+exist for this local, not-yet-pushed repository. Once this is on GitHub
+with real secrets configured, worth triggering `workflow_dispatch` manually
+once to confirm the whole chain end to end before trusting the weekly
+schedule.

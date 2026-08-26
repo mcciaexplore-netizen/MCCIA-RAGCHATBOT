@@ -5,7 +5,7 @@ issue is considered already ingested if any article with its Drive file ID
 is already in the articles table.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import psycopg
 
@@ -18,6 +18,13 @@ def already_ingested(conn: psycopg.Connection, drive_file_id: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("select 1 from articles where drive_file_id = %s limit 1", (drive_file_id,))
         return cur.fetchone() is not None
+
+
+def ingested_issue_months(conn: psycopg.Connection) -> Set[str]:
+    """Phase 6: what check_for_new_issues() diffs the web archive against."""
+    with conn.cursor() as cur:
+        cur.execute("select distinct issue_month from articles")
+        return {row[0] for row in cur.fetchall()}
 
 
 def insert_article(

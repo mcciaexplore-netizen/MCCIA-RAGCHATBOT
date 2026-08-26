@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pymupdf
 
-from ingest.run_pipeline import cmd_process
+from ingest.run_pipeline import cmd_all, cmd_check_web, cmd_process
 from ingest.split_articles import Article
 
 
@@ -52,13 +52,17 @@ class _FakeCursor:
     def fetchone(self):
         return self._conn.next_fetchone
 
+    def fetchall(self):
+        return [(m,) for m in self._conn.ingested_months]
+
 
 class _FakeConnection:
-    def __init__(self, existing_drive_ids=()):
+    def __init__(self, existing_drive_ids=(), ingested_months=()):
         self.executed = []
         self.next_id = 0
         self.next_fetchone = None
         self.existing_drive_ids = set(existing_drive_ids)
+        self.ingested_months = set(ingested_months)
         self.commits = 0
         self.rollbacks = 0
 
@@ -75,12 +79,13 @@ class _FakeConnection:
         pass
 
 
-def _patched(fake_conn, articles):
+def _patched(fake_conn, articles, new_web_issues=()):
     return (
         patch("ingest.run_pipeline.connect", return_value=fake_conn),
         patch("ingest.run_pipeline.split_issue_into_articles", return_value=articles),
         patch("ingest.run_pipeline.lookup_source_url", return_value=None),
         patch("ingest.db_writer.embed_texts", return_value=[[0.0] * 1536]),
+        patch("ingest.run_pipeline.check_for_new_issues", return_value=list(new_web_issues)),
     )
 
 
@@ -102,8 +107,8 @@ def test_process_writes_dated_articles_from_synthetic_pdf(tmp_path, monkeypatch)
     fake_conn = _FakeConnection()
     fake_articles = [Article(title="Editorial", author="The Editor", body="Welcome to this special issue on robotics.")]
 
-    p1, p2, p3, p4 = _patched(fake_conn, fake_articles)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
+    with p1, p2, p3, p4, p5:
         cmd_process(_Args())
 
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
@@ -127,8 +132,8 @@ def test_process_logs_manual_review_when_date_undetectable(tmp_path, monkeypatch
     (staging / ".drive_ids.json").write_text('{"scan_final_v2.pdf": "drive-xyz"}')
 
     fake_conn = _FakeConnection()
-    p1, p2, p3, p4 = _patched(fake_conn, [])
-    with p1, p2 as fake_split, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(fake_conn, [])
+    with p1, p2 as fake_split, p3, p4, p5:
         cmd_process(_Args())
         fake_split.assert_not_called()
 
@@ -152,8 +157,8 @@ def test_process_skips_pdf_already_in_database(tmp_path, monkeypatch):
     fake_conn = _FakeConnection(existing_drive_ids={"drive-already-here"})
     fake_articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
 
-    p1, p2, p3, p4 = _patched(fake_conn, fake_articles)
-    with p1, p2 as fake_split, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
+    with p1, p2 as fake_split, p3, p4, p5:
         cmd_process(_Args())
         fake_split.assert_not_called()
 
@@ -175,8 +180,8 @@ def test_process_force_reprocesses_and_deletes_old_rows(tmp_path, monkeypatch):
     class _ForceArgs:
         force = True
 
-    p1, p2, p3, p4 = _patched(fake_conn, fake_articles)
-    with p1, p2 as fake_split, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
+    with p1, p2 as fake_split, p3, p4, p5:
         cmd_process(_ForceArgs())
         fake_split.assert_called_once()
 
@@ -194,9 +199,45 @@ def test_process_skips_pdf_with_no_drive_id_on_record(tmp_path, monkeypatch):
     # No .drive_ids.json at all -- sync was never run.
 
     fake_conn = _FakeConnection()
-    p1, p2, p3, p4 = _patched(fake_conn, [])
-    with p1, p2 as fake_split, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(fake_conn, [])
+    with p1, p2 as fake_split, p3, p4, p5:
         cmd_process(_Args())
         fake_split.assert_not_called()
 
     assert fake_conn.executed == []
+
+
+def test_check_web_passes_ingested_months_from_the_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(tmp_path / "raw"))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+
+    fake_conn = _FakeConnection(ingested_months={"2021-06", "2021-07"})
+    p1, p2, p3, p4, p5 = _patched(fake_conn, [])
+    with p1, p2, p3, p4, p5 as fake_check:
+        cmd_check_web(_Args())
+
+    fake_check.assert_called_once_with({"2021-06", "2021-07"})
+    assert fake_conn.executed == [("select distinct issue_month from articles", None)]
+
+
+def test_all_runs_sync_process_and_check_web_in_order(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+
+    _make_pdf(staging / "2021-06.pdf", ["Editorial\nBy Someone\nBody text here."])
+    (staging / ".drive_ids.json").write_text('{"2021-06.pdf": "drive-abc"}')
+
+    fake_conn = _FakeConnection()
+    fake_articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
+
+    p1, p2, p3, p4, p5 = _patched(fake_conn, fake_articles)
+    with p1, p2, p3, p4, p5 as fake_check, patch(
+        "ingest.run_pipeline.sync_all", return_value=[]
+    ) as fake_sync:
+        cmd_all(_Args())
+
+    fake_sync.assert_called_once()
+    assert any("insert into articles" in e[0] for e in fake_conn.executed)
+    fake_check.assert_called_once()

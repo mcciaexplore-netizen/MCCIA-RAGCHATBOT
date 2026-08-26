@@ -1,4 +1,10 @@
-from ingest.db_writer import already_ingested, insert_article, insert_chunks, write_article
+from ingest.db_writer import (
+    already_ingested,
+    ingested_issue_months,
+    insert_article,
+    insert_chunks,
+    write_article,
+)
 from ingest.split_articles import Article
 
 
@@ -53,6 +59,41 @@ def test_already_ingested_true_when_drive_id_present():
 def test_already_ingested_false_when_drive_id_absent():
     conn = _FakeConnection(existing_drive_ids={"abc123"})
     assert already_ingested(conn, "not-there") is False
+
+
+class _DistinctMonthsCursor:
+    def __init__(self, months):
+        self._months = months
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        assert "select distinct issue_month from articles" in sql
+
+    def fetchall(self):
+        return [(m,) for m in self._months]
+
+
+class _DistinctMonthsConnection:
+    def __init__(self, months):
+        self._months = months
+
+    def cursor(self):
+        return _DistinctMonthsCursor(self._months)
+
+
+def test_ingested_issue_months_returns_distinct_months_as_a_set():
+    conn = _DistinctMonthsConnection(["2021-06", "2021-07", "2021-06"])
+    assert ingested_issue_months(conn) == {"2021-06", "2021-07"}
+
+
+def test_ingested_issue_months_empty_when_nothing_ingested():
+    conn = _DistinctMonthsConnection([])
+    assert ingested_issue_months(conn) == set()
 
 
 def test_insert_article_returns_new_id():

@@ -1,5 +1,2 @@
-# Runtime deps live in ingest/requirements.txt -- that's also what
-# infra/sampada_stack.py's PythonFunction bundles for the Phase 6 Lambda
-# (it only looks for a requirements.txt inside the entry directory).
--r ingest/requirements.txt
-pytest==9.1.1
+psycopg[binary]>=3.2
+python-dotenv>=1.0

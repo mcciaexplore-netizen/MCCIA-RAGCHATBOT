@@ -26,7 +26,13 @@ const CLASSIFICATION_JSON_SCHEMA = {
     },
     issue_month: {
       type: "string",
-      description: "Only when scope is 'issue': that issue's date as YYYY-MM.",
+      // A prose description alone isn't reliable -- observed against a
+      // real Gemini call, "June 2021" (a human date) came back instead of
+      // "2021-06" despite the prompt spelling out the format. The pattern
+      // constraint plus a concrete example fixes it; parseClassification's
+      // regex check stays as defense-in-depth regardless.
+      description: "Only when scope is 'issue': that issue's date as YYYY-MM, e.g. \"2021-06\" for June 2021. Never a month name.",
+      pattern: "^\\d{4}-(0[1-9]|1[0-2])$",
     },
   },
   required: ["scope"],
@@ -36,7 +42,7 @@ export function systemPrompt(today: string): string {
   return `You classify questions about Sampada, MCCIA's monthly industrial magazine archive (issues going back 70+ years). Today's date is ${today}.
 
 Respond with JSON matching the given schema.
-- scope="issue" only when the question names or clearly pins down ONE specific issue: an explicit month+year ("June 2021"), or a relative reference resolvable from today's date ("last month's issue", "the latest issue"). Set issue_month to that issue's date as YYYY-MM.
+- scope="issue" only when the question names or clearly pins down ONE specific issue: an explicit month+year ("June 2021"), or a relative reference resolvable from today's date ("last month's issue", "the latest issue"). Set issue_month to that issue's date in numeric YYYY-MM form -- "June 2021" becomes "2021-06", never the month name.
 - scope="open" for anything else: topics, themes, people, or spans of time ("during COVID", "in the 2010s", "over the last decade"), or a question that names a year but not a month.
 - If you cannot confidently resolve one specific YYYY-MM, use scope="open" rather than guessing.`;
 }

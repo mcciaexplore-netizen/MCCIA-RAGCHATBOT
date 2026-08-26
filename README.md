@@ -25,7 +25,8 @@ Being built phase by phase:
 - [x] **Phase 1: Database setup** -- `db/schema.sql`, `db/migrate.py`
 - [x] **Phase 2: Ingestion** -- `ingest/` (Drive sync, text extraction,
       Gemini article splitting, chunking + embedding, Postgres writes)
-- [ ] Phase 3: Query routing (issue-scoped vs. open topic search)
+- [x] **Phase 3: Query routing** -- `web/src/lib/gemini/query-router.ts`,
+      `web/src/lib/retrieval.ts`
 - [ ] Phase 4: Answer generation with citations
 - [ ] Phase 5: Chat UI (`web/`)
 - [ ] Phase 6: Keep it current (scheduled re-ingestion)
@@ -115,22 +116,62 @@ mentions pulling topic tags into the archive, but the approved Phase 1
 schema has no `topic_tags` column -- confirmed with the user to store only
 `source_url` and drop tags rather than alter the already-built schema.
 
+## Phase 3: Query routing
+
+Lives in `web/` (TypeScript), not `ingest/` (Python) -- this is runtime
+query-serving logic that Next.js API routes call on every question, not a
+batch ingestion step. Not wired into `api/chat/route.ts` yet (still calling
+the Bedrock version) -- that swap is Phase 5.
+
+- `web/src/lib/gemini/query-router.ts` -- `classifyQuery(question)` sends the
+  question to `gemini-3.5-flash-lite` with a small classification prompt
+  (today's date included, so "the latest issue" resolves), gets back strict
+  JSON (`{scope, issue_month?}`), and falls back to `scope: "open"` on
+  anything malformed rather than risking a broken SQL filter that silently
+  returns zero rows.
+- `web/src/lib/retrieval.ts` -- `search(embedding, route)` is the shared
+  query the spec describes: same SQL either way, issue-scoped adds
+  `where a.issue_month = $1`, both join `chunks` to `articles` so every
+  result carries `issueMonth`/`articleTitle`/`sourceUrl` for citations.
+  Defaults to the spec's top-8-to-12 range (10). Embedding the question
+  itself is Phase 4's first step, not this one -- `search()` just takes
+  whatever embedding vector it's given.
+- `web/src/lib/db.ts` -- the one place that knows how to reach Neon from the
+  web app (`@neondatabase/serverless`), mirroring `db/connection.py` on the
+  Python side. pgvector has no native type in the HTTP driver, so embeddings
+  are sent as a bracketed literal and cast with `::vector` in the query.
+
+Model IDs and 1536-dimensional embeddings are the same constants as the
+ingestion side (`web/src/lib/gemini/models.ts` mirrors `ingest/config.py`) --
+re-verified against ai.google.dev's JS/TS docs specifically (`@google/genai`,
+not Python's `google-genai`; confirmed the `interactions.create` /
+`models.embedContent` param shapes against the installed package's own
+`.d.ts` files, not just the docs prose).
+
 ## Tests
 
 ```bash
-python -m pytest
+python -m pytest      # ingestion (Phases 1-2)
+cd web && npm test    # web app, including Phases 3+ (Vitest)
 ```
 
-56 tests, all passing, covering: the schema's structure (Phase 1), issue-date
+Python: 56 tests, covering the schema's structure (Phase 1), issue-date
 detection across filename/cover-text formats, PDF text extraction, article
 boundary slicing and Gemini response validation/retry (with a fake client,
 no real API calls), chunking, embedding batching/normalization (fake
 client), Postgres writes and resumability (fake connection), the
 mcciapunesampada.com feed parsing, and an end-to-end `process` run against a
-synthetic PDF with Gemini and Postgres both stubbed. None of this has been
-run against real Gemini or Neon credentials yet (none are configured in this
-environment) -- worth a manual dry run against a single real issue before
-pointing this at the full 70-year archive.
+synthetic PDF with Gemini and Postgres both stubbed.
+
+Web: 57 tests, including Phase 3's classification parsing/fallback behavior
+and `search()`'s query shape (issue filter present/absent, vector literal
+formatting, the chunks-join-articles select list, default vs. caller-supplied
+limit) -- all against a fake `interactions.create`/tagged-template client,
+no real Gemini or Neon calls.
+
+None of this has been run against real Gemini or Neon credentials yet (none
+are configured in this environment) -- worth a manual dry run against a
+single real issue before pointing this at the full 70-year archive.
 
 ## Web app
 

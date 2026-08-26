@@ -25,4 +25,12 @@ export const config = {
   get s3Bucket(): string {
     return requireEnv("S3_BUCKET");
   },
+
+  // Gemini + Neon (the new retrieval layer) -- see sampada/README.md.
+  get geminiApiKey(): string {
+    return requireEnv("GEMINI_API_KEY");
+  },
+  get databaseUrl(): string {
+    return requireEnv("DATABASE_URL");
+  },
 };

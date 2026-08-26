@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f7f8fa;
+  --foreground: #0f172a;
+
+  /* Brand: matches mcciapune.com/initiatives/ai-studio -- indigo primary,
+     emerald accent, Outfit/Bricolage Grotesque type. */
+  --brand-primary: #003f8a;
+  --brand-primary-hover: #002d63;
+  --brand-accent: #10b981;
+  --brand-accent-hover: #059669;
+  --brand-surface: #ffffff;
+  --brand-text-muted: #475569;
+  --brand-border: #e2e8f0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-brand-bg: var(--background);
+  --color-brand-text: var(--foreground);
+  --color-brand-primary: var(--brand-primary);
+  --color-brand-primary-hover: var(--brand-primary-hover);
+  --color-brand-accent: var(--brand-accent);
+  --color-brand-accent-hover: var(--brand-accent-hover);
+  --color-brand-surface: var(--brand-surface);
+  --color-brand-text-muted: var(--brand-text-muted);
+  --color-brand-border: var(--brand-border);
+
+  --font-heading: var(--font-heading);
+  --font-body: var(--font-body);
+}
+
+/* Plain CSS is unlayered and beats every Tailwind utility (including
+   `focus:outline-none`) regardless of source order, since unlayered rules
+   always win over the `utilities` layer -- wrapping these in `@layer base`
+   puts them in Tailwind's own cascade so utility classes can still override
+   them as expected. */
+@layer base {
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-heading), system-ui, sans-serif;
+    font-weight: 700;
+  }
+
+  /* Browsers default focus rings and text selection to blue -- override both
+     in one place instead of remembering a ring utility on every element. */
+  :focus-visible {
+    outline: 2px solid var(--brand-accent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--brand-accent);
+    color: var(--brand-primary);
+  }
+}

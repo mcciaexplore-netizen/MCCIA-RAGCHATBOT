@@ -1,0 +1,7 @@
+pymupdf==1.26.5
+boto3==1.43.79
+google-api-python-client==2.198.0
+google-auth==2.55.1
+google-auth-httplib2==0.4.0
+google-auth-oauthlib==1.2.1
+python-dotenv==1.0.1

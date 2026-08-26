@@ -1,0 +1,4 @@
+aws-cdk-lib==2.266.0
+constructs==10.8.1
+cdklabs.generative-ai-cdk-constructs==0.1.318
+aws-cdk.aws-lambda-python-alpha==2.266.0a0

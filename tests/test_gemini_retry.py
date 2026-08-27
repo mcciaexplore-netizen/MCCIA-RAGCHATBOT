@@ -58,3 +58,35 @@ def test_does_not_retry_permanent_client_errors():
         call_with_retry("test", invalid_request, sleep=lambda _delay: None)
 
     assert attempts == 1
+
+
+def test_is_transient_override_lets_another_api_reuse_this_backoff_loop():
+    # e.g. ingest/drive_sync.py, whose errors aren't google.genai APIErrors.
+    attempts = 0
+
+    def flaky_download():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise TimeoutError("read timed out")
+        return "downloaded"
+
+    result = call_with_retry(
+        "test",
+        flaky_download,
+        sleep=lambda _delay: None,
+        is_transient=lambda exc: isinstance(exc, TimeoutError),
+    )
+
+    assert result == "downloaded"
+    assert attempts == 2
+
+
+def test_is_transient_override_still_raises_for_errors_it_does_not_recognize():
+    with pytest.raises(ValueError):
+        call_with_retry(
+            "test",
+            lambda: (_ for _ in ()).throw(ValueError("not retryable")),
+            sleep=lambda _delay: None,
+            is_transient=lambda exc: isinstance(exc, TimeoutError),
+        )

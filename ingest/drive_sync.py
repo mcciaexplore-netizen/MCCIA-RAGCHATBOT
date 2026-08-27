@@ -9,19 +9,35 @@ not from Drive folder structure.
 
 import io
 import json
+import ssl
 from pathlib import Path
 from typing import Iterator, NamedTuple, Optional
 
+import httplib2
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 from db.config import google_drive_folder_id
 from ingest.config import google_service_account_file, local_staging_dir, require_for_drive
+from ingest.gemini_retry import TRANSIENT_STATUS_CODES, call_with_retry
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 FOLDER_MIME = "application/vnd.google-apps.folder"
 PDF_MIME = "application/pdf"
+
+# Network hiccups and Drive-side hiccups (rate limit, temporary server
+# error) are worth retrying; a real "file not found" or "permission denied"
+# response is not -- retrying either just wastes time before failing the
+# same way.
+_TRANSIENT_NETWORK_ERRORS = (TimeoutError, ConnectionError, ssl.SSLError, httplib2.HttpLib2Error)
+
+
+def _is_transient_drive_error(exc: Exception) -> bool:
+    if isinstance(exc, HttpError):
+        return exc.resp.status in TRANSIENT_STATUS_CODES
+    return isinstance(exc, _TRANSIENT_NETWORK_ERRORS)
 
 
 class DriveFile(NamedTuple):
@@ -42,15 +58,17 @@ def build_drive_service():
 def _list_children(service, folder_id: str):
     page_token = None
     while True:
-        resp = (
-            service.files()
+        resp = call_with_retry(
+            f"Drive list children of {folder_id}",
+            lambda: service.files()
             .list(
                 q=f"'{folder_id}' in parents and trashed = false",
                 fields="nextPageToken, files(id, name, mimeType, modifiedTime, size)",
                 pageToken=page_token,
                 pageSize=200,
             )
-            .execute()
+            .execute(),
+            is_transient=_is_transient_drive_error,
         )
         yield from resp.get("files", [])
         page_token = resp.get("nextPageToken")
@@ -82,7 +100,11 @@ def download_file(service, file_id: str, dest: Path) -> None:
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            _, done = call_with_retry(
+                f"Drive download {dest.name}",
+                downloader.next_chunk,
+                is_transient=_is_transient_drive_error,
+            )
     tmp.rename(dest)
 
 
@@ -96,7 +118,7 @@ def _drive_ids_path(dest_dir: Path) -> Path:
 def load_drive_ids(dest_dir: Optional[Path] = None) -> dict:
     """filename -> Drive file_id, for whatever's currently in dest_dir.
 
-    articles.drive_file_id needs the real Drive ID (so citations can always
+    sampada.source_pdf_id needs the real Drive ID (so citations can always
     trace back to the source PDF), but sync_all() downloads files by name
     only -- this sidecar is what lets process_pdf() recover the ID for a
     given local file without extra Drive API calls.

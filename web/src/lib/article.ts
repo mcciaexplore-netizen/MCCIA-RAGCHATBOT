@@ -28,8 +28,8 @@ export async function fetchArticle(
   const rows = (await sql`
     select
       id,
-      issue_month as "issueMonth",
-      issue_year as "issueYear",
+      year::text || '-' || lpad(month::text, 2, '0') as "issueMonth",
+      year as "issueYear",
       article_title as "articleTitle",
       author,
       body,

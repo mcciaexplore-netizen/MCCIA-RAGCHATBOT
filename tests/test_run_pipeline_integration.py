@@ -4,6 +4,7 @@ statements against a fake connection. Gemini and the DB are stubbed since
 they need real credentials.
 """
 
+import json
 from unittest.mock import patch
 
 from ingest.detect_issue_boundaries import IssueBoundary, IssueBoundaryError
@@ -28,17 +29,21 @@ class _FakeCursor:
     def execute(self, sql, params=None):
         sql_norm = sql.strip()
         self._conn.executed.append((sql_norm, params))
-        if "select drive_file_id from articles where issue_month" in sql_norm:
-            matches = [drive_id for drive_id, month in self._conn.existing_keys if month == params[0]]
+        if "select source_pdf_id from sampada" in sql_norm:
+            issue_month = f"{params[0]:04d}-{params[1]:02d}"
+            matches = [drive_id for drive_id, month in self._conn.existing_keys if month == issue_month]
             self._conn.next_fetchone = (matches[0],) if matches else None
-        elif "select 1 from articles" in sql_norm:
-            key = (params[0], params[1])
+        elif "select 1 from sampada" in sql_norm:
+            key = (params[0], f"{params[1]:04d}-{params[2]:02d}")
             self._conn.next_fetchone = (1,) if key in self._conn.existing_keys else None
+        elif "insert into sampada" in sql_norm:
+            self._conn.existing_keys.add((params[2], f"{params[0]:04d}-{params[1]:02d}"))
+            self._conn.next_fetchone = (params[2],)
         elif "insert into articles" in sql_norm:
             self._conn.next_id += 1
             self._conn.next_fetchone = (self._conn.next_id,)
-        elif "delete from articles" in sql_norm:
-            self._conn.existing_keys.discard((params[0], params[1]))
+        elif "delete from sampada" in sql_norm:
+            self._conn.existing_keys.discard((params[0], f"{params[1]:04d}-{params[2]:02d}"))
 
     def executemany(self, sql, seq_of_params):
         self._conn.executed.append((sql.strip(), list(seq_of_params)))
@@ -47,7 +52,7 @@ class _FakeCursor:
         return self._conn.next_fetchone
 
     def fetchall(self):
-        return [(m,) for m in self._conn.ingested_months]
+        return [tuple(map(int, m.split("-"))) for m in self._conn.ingested_months]
 
 
 class _FakeConnection:
@@ -113,12 +118,11 @@ def test_process_writes_articles_for_a_single_detected_issue(tmp_path, monkeypat
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 1
     _, params = insert_calls[0]
-    assert params[0] == 2021  # issue_year
-    assert params[1] == 6  # issue_month_number
+    assert params[0] == 2021  # year
+    assert params[1] == 6  # month
     assert params[2] == 1  # article_index
-    assert params[3] == "2021-06"  # canonical issue_month key
-    assert params[4] == "Editorial"  # article_title
-    assert params[8] == "drive-abc123"  # drive_file_id
+    assert params[3] == "Editorial"  # article_title
+    assert params[7] == "drive-abc123"  # source_pdf_id
     assert fake_conn.commits == 1
 
 
@@ -179,8 +183,8 @@ def test_process_writes_every_issue_bundled_in_one_pdf(tmp_path, monkeypatch):
 
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 2
-    issue_months = {params[3] for _, params in insert_calls}
-    assert issue_months == {"1945-07", "1946-01"}
+    issue_coordinates = {params[0:2] for _, params in insert_calls}
+    assert issue_coordinates == {(1945, 7), (1946, 1)}
     assert fake_conn.commits == 2  # one commit per issue, not one for the whole PDF
 
 
@@ -210,7 +214,7 @@ def test_process_one_bad_issue_does_not_block_the_others_in_the_same_pdf(tmp_pat
 
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 1
-    assert insert_calls[0][1][3] == "1945-07"
+    assert insert_calls[0][1][0:2] == (1945, 7)
 
 
 def test_process_logs_manual_review_when_issue_boundaries_undetectable(tmp_path, monkeypatch):
@@ -282,6 +286,73 @@ def test_process_skips_and_flags_an_issue_already_ingested_from_a_different_pdf(
     assert "different source PDF" in review_log.read_text()
 
 
+def test_process_skips_ocr_entirely_for_a_file_already_fully_processed(tmp_path, monkeypatch):
+    # Once every issue in a file has resolved, a rerun shouldn't pay for
+    # OCR again just to rediscover "yes, still already ingested."
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "2019-03.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"2019-03.pdf": "drive-already-here"}')
+    (staging / ".fully_processed.json").write_text('["drive-already-here"]')
+
+    fake_conn = _FakeConnection()
+    patches = _patched(fake_conn, issues=[])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6] as fake_extract:
+        cmd_process(_Args())
+        fake_extract.assert_not_called()
+
+    assert fake_conn.executed == []
+
+
+def test_process_marks_a_file_fully_processed_once_every_issue_resolves(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "1945 July.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"1945 July.pdf": "drive-bound-vol"}')
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=1945, month=7)
+    articles = [Article(title="News Roundup", author="", body="July news.")]
+
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        cmd_process(_Args())
+
+    marker = json.loads((staging / ".fully_processed.json").read_text())
+    assert marker == ["drive-bound-vol"]
+
+
+def test_process_does_not_mark_a_file_fully_processed_when_an_issue_needs_manual_review(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "bound.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"bound.pdf": "drive-bound"}')
+
+    fake_conn = _FakeConnection()
+    good_issue = (
+        IssueBoundary(start_page=0, year=1945, month=7),
+        ["cover 1", "body 1"],
+        [Article(title="News Roundup", author="", body="July news.")],
+    )
+    bad_issue = (
+        IssueBoundary(start_page=2, year=1946, month=1),
+        ["cover 2", "body 2"],
+        ArticleSplitError("Gemini returned malformed article boundaries twice"),
+    )
+
+    patches = _patched(fake_conn, issues=[good_issue, bad_issue])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        cmd_process(_Args())
+
+    assert not (staging / ".fully_processed.json").exists()
+
+
 def test_process_force_reprocesses_and_deletes_only_that_issue(tmp_path, monkeypatch):
     staging = tmp_path / "raw"
     staging.mkdir()
@@ -302,9 +373,9 @@ def test_process_force_reprocesses_and_deletes_only_that_issue(tmp_path, monkeyp
         cmd_process(_ForceArgs())
         fake_split.assert_called_once()
 
-    delete_calls = [e for e in fake_conn.executed if "delete from articles" in e[0]]
+    delete_calls = [e for e in fake_conn.executed if "delete from sampada" in e[0]]
     assert len(delete_calls) == 1
-    assert delete_calls[0][1] == ("drive-already-here", "2019-03")
+    assert delete_calls[0][1] == ("drive-already-here", 2019, 3)
     assert any("insert into articles" in e[0] for e in fake_conn.executed)
 
 
@@ -391,7 +462,7 @@ def test_check_web_passes_ingested_months_from_the_database(tmp_path, monkeypatc
         cmd_check_web(_Args())
 
     fake_check.assert_called_once_with({"2021-06", "2021-07"})
-    assert fake_conn.executed == [("select distinct issue_month from articles", None)]
+    assert fake_conn.executed == [("select year, month from sampada", None)]
 
 
 def test_all_runs_sync_process_and_check_web_in_order(tmp_path, monkeypatch):

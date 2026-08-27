@@ -57,15 +57,31 @@ Neon's direct endpoint by removing `-pooler` from the configured hostname.
 python -m db.migrate
 ```
 
-Applies `db/schema.sql` for a fresh database, or the additive coordinate
-migration for an existing database. Articles are addressed by the unique,
-1-based tuple `(issue_year, issue_month_number, article_index)`. Each article
-has one or more chunk rows addressed by `chunk_index`, and every chunk stores a
-1536-dimensional vector. The `sampada_article_vectors` view exposes the query
-shape `year, month, article_index, chunk_index, content, embedding` directly.
+Applies `db/schema.sql` for a fresh database. Existing databases are moved to
+the new hierarchy with the three branch-first scripts in this order:
+`db/restructure_01_sampada.sql`, `db/restructure_02_articles.sql`, then
+`db/restructure_03_smaller_chunks.sql`. The old tables are renamed with a
+`_legacy` suffix, not deleted, so migrated counts can be verified before any
+production cutover.
 
-The schema indexes `articles.issue_month` plus an HNSW index on
-`chunks.embedding`. Embeddings are stored at 1536 dimensions (requested
+After running all three scripts on a Neon branch, verify row contents,
+embeddings, foreign keys, chronology, the HNSW index, and web query shapes:
+
+```bash
+python -m db.verify_restructure \
+  --project-id <neon-project-id> \
+  --branch <migration-branch-name>
+```
+
+The hierarchy is `sampada -> articles -> smaller_chunks`. A monthly Sampada is
+keyed by `(year, month)`, an article by `(year, month, article_index)`, and a
+vector piece by `(year, month, article_index, chunk_index)`. Every searchable
+piece stores a 1536-dimensional vector. Queries that must be chronological use
+`order by year, month, article_index, chunk_index`; row display order is not an
+implicit property of a Postgres table.
+
+The schema has a numeric chronology index plus an HNSW index on
+`smaller_chunks.embedding`. Embeddings are stored at 1536 dimensions (requested
 explicitly from `gemini-embedding-001`, whose default is 3072) because
 pgvector's HNSW/IVFFlat indexes cap at 2000 dimensions -- anything wider
 can't be indexed and every query would fall back to a full scan.
@@ -94,7 +110,7 @@ Pipeline, per PDF:
 1. `ingest/drive_sync.py` walks the whole Drive folder tree recursively and
    downloads every `application/pdf`, regardless of how it's organized. Also
    writes `staging/raw/.drive_ids.json` (filename -> Drive file ID), since
-   `articles.drive_file_id` needs the real ID and `process` works from local
+   `sampada.source_pdf_id` needs the real ID and `process` works from local
    files.
 2. `ingest/extract_text.py` pulls the text layer directly (PyMuPDF, no OCR).
 3. `ingest/detect_issue_date.py` tries the filename, then the first 2 pages'
@@ -107,16 +123,17 @@ Pipeline, per PDF:
    The body is sliced from the *original* extracted text client-side, so
    citations stay byte-exact. A malformed response gets one retry, then the
    PDF is logged to manual review and skipped.
-5. Each article is inserted into `articles` with its numeric year, month, and
-   1-based position in that issue, keeping `drive_file_id` so citations can
-   always trace back to the source PDF. For 2021+ issues,
+5. The monthly parent is upserted into `sampada`, then each article is inserted
+   into `articles` with its numeric year, month, and 1-based position. The
+   source PDF ID is retained at both levels so data remains traceable. For
+   2021+ issues,
    `ingest/web_archive.py` looks up the matching mcciapunesampada.com page
    for `source_url` (best-effort -- a network hiccup never fails the run).
 6. `ingest/chunking.py` splits the body into ~300-token chunks with a ~50
    token overlap; `ingest/embeddings.py` embeds each with
    `gemini-embedding-001` at 1536 dimensions (batched, L2-normalized per
    Google's guidance for non-default dimensionality) and inserts into
-   `chunks`.
+   `smaller_chunks` with the full year/month/article/chunk coordinate.
 
 Gemini rate limits and temporary server failures (`429`, `500`, `502`,
 `503`, `504`) are retried up to five times with exponential backoff. If a
@@ -128,8 +145,8 @@ For an interrupted first import, `--start-at` resumes from an exact staged
 filename (inclusive). OCR rasterization is streamed in six-page batches so
 the largest annual bound volumes do not hold every rendered page in memory.
 
-Resumable per Phase 2's spec: `already_ingested()` checks the database
-itself (any article with this Drive file ID) rather than a local manifest,
+Resumable per Phase 2's spec: `already_ingested()` checks the `sampada` table
+for the source PDF ID plus numeric year/month rather than a local manifest,
 so a crash partway through doesn't mean starting over -- just re-run
 `process`. One PDF's unexpected failure is logged and skipped rather than
 stopping the whole run.
@@ -153,8 +170,9 @@ batch ingestion step. Wired into `api/chat/route.ts` as of Phase 5.
   returns zero rows.
 - `web/src/lib/retrieval.ts` -- `search(embedding, route)` is the shared
   query the spec describes: same SQL either way, issue-scoped adds
-  `where a.issue_month = $1`, both join `chunks` to `articles` so every
-  result carries `issueMonth`/`articleTitle`/`sourceUrl` for citations.
+  numeric `where c.year = $1 and c.month = $2`; both join `smaller_chunks`
+  to `articles` using `(year, month, article_index)` so every result carries
+  `issueMonth`/`articleTitle`/`sourceUrl` for citations.
   Defaults to the spec's top-8-to-12 range (10). Embedding the question
   itself is Phase 4's first step, not this one -- `search()` just takes
   whatever embedding vector it's given.
@@ -298,7 +316,7 @@ key file, not a path).
 `all` now runs a third step after sync/process: `ingest/run_pipeline.py
 check-web` (`ingest/web_archive.py`'s `check_for_new_issues`, deferred from
 Phase 2). It diffs mcciapunesampada.com's page feed against
-`ingested_issue_months()` (a `select distinct issue_month from articles`,
+`ingested_issue_months()` (a `select year, month from sampada`,
 not a local index file the way the archived build did it) and logs any
 issue that's live on the web but has no Drive PDF ingested yet -- matching
 the spec's framing exactly: a supplementary signal, not an ingestion path.

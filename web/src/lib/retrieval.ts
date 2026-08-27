@@ -20,8 +20,8 @@ export type SearchResult = {
 const DEFAULT_LIMIT = 10; // spec: "top 8 to 12 results"
 
 /** Same SQL query with an optional WHERE clause (Phase 3): issue-scoped
- * questions filter to that issue_month, open questions search everything.
- * Both join chunks to articles so every result carries its issue_month and
+ * questions filter to that numeric year/month, open questions search everything.
+ * Both join smaller_chunks to articles so every result carries its issue_month and
  * article_title for citations.
  */
 export async function search(
@@ -32,6 +32,8 @@ export async function search(
   const limit = opts?.limit ?? DEFAULT_LIMIT;
   const sql = opts?.client ?? getDb();
   const vector = toVectorLiteral(embedding);
+  const [issueYear, issueMonth] =
+    route.scope === "issue" ? route.issueMonth.split("-").map(Number) : [0, 0];
 
   const rows =
     route.scope === "issue"
@@ -39,12 +41,15 @@ export async function search(
           select
             a.id as "articleId",
             c.content,
-            a.issue_month as "issueMonth",
+            a.year::text || '-' || lpad(a.month::text, 2, '0') as "issueMonth",
             a.article_title as "articleTitle",
             a.source_url as "sourceUrl"
-          from chunks c
-          join articles a on a.id = c.article_id
-          where a.issue_month = ${route.issueMonth}
+          from smaller_chunks c
+          join articles a
+            on a.year = c.year
+           and a.month = c.month
+           and a.article_index = c.article_index
+          where c.year = ${issueYear} and c.month = ${issueMonth}
           order by c.embedding <=> ${vector}::vector
           limit ${limit}
         `
@@ -52,11 +57,14 @@ export async function search(
           select
             a.id as "articleId",
             c.content,
-            a.issue_month as "issueMonth",
+            a.year::text || '-' || lpad(a.month::text, 2, '0') as "issueMonth",
             a.article_title as "articleTitle",
             a.source_url as "sourceUrl"
-          from chunks c
-          join articles a on a.id = c.article_id
+          from smaller_chunks c
+          join articles a
+            on a.year = c.year
+           and a.month = c.month
+           and a.article_index = c.article_index
           order by c.embedding <=> ${vector}::vector
           limit ${limit}
         `;

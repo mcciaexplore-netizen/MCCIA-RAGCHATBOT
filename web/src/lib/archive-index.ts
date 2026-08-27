@@ -54,12 +54,12 @@ export async function getBrowseIndex(
   const rows = (await sql`
     select
       a.id,
-      a.issue_month as "issueMonth",
-      a.issue_year as "issueYear",
+      a.year::text || '-' || lpad(a.month::text, 2, '0') as "issueMonth",
+      a.year as "issueYear",
       a.article_title as "articleTitle",
       a.source_url as "sourceUrl"
     from articles a
-    order by a.issue_month asc, a.article_index asc
+    order by a.year asc, a.month asc, a.article_index asc
   `) as ArticleRow[];
 
   return { issues: groupIntoIssues(rows) };

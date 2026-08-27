@@ -1,9 +1,4 @@
-"""Writes split, chunked, embedded articles into Postgres.
-
-Resumability (Phase 2 step 8) is a DB check, not a local manifest file: an
-issue is considered already ingested if any article with its Drive file ID
-is already in the articles table.
-"""
+"""Writes Sampada publications, articles, and vector chunks into Postgres."""
 
 from typing import List, Optional, Set
 
@@ -14,15 +9,24 @@ from ingest.embeddings import embed_texts
 from ingest.split_articles import Article
 
 
+def _parse_issue_month(issue_month: str) -> tuple[int, int]:
+    year_text, month_text = issue_month.split("-", maxsplit=1)
+    year, month = int(year_text), int(month_text)
+    if len(year_text) != 4 or len(month_text) != 2 or not 1 <= month <= 12:
+        raise ValueError(f"invalid issue month: {issue_month!r}")
+    return year, month
+
+
 def already_ingested(conn: psycopg.Connection, drive_file_id: str, issue_month: str) -> bool:
     """A single PDF can bundle several issues (see extract_text.py), so
     resumability is keyed on (drive_file_id, issue_month), not just the
     file -- otherwise ingesting one issue from a PDF would make every other
     issue still bundled in that same file look "already done"."""
+    year, month = _parse_issue_month(issue_month)
     with conn.cursor() as cur:
         cur.execute(
-            "select 1 from articles where drive_file_id = %s and issue_month = %s limit 1",
-            (drive_file_id, issue_month),
+            "select 1 from sampada where source_pdf_id = %s and year = %s and month = %s limit 1",
+            (drive_file_id, year, month),
         )
         return cur.fetchone() is not None
 
@@ -39,10 +43,11 @@ def issue_month_source(conn: psycopg.Connection, issue_month: str) -> Optional[s
     that's already here from elsewhere. Used to skip -- and flag for manual
     review -- rather than silently writing the same issue twice from two
     different sources."""
+    year, month = _parse_issue_month(issue_month)
     with conn.cursor() as cur:
         cur.execute(
-            "select drive_file_id from articles where issue_month = %s limit 1",
-            (issue_month,),
+            "select source_pdf_id from sampada where year = %s and month = %s limit 1",
+            (year, month),
         )
         row = cur.fetchone()
         return row[0] if row else None
@@ -51,8 +56,35 @@ def issue_month_source(conn: psycopg.Connection, issue_month: str) -> Optional[s
 def ingested_issue_months(conn: psycopg.Connection) -> Set[str]:
     """Phase 6: what check_for_new_issues() diffs the web archive against."""
     with conn.cursor() as cur:
-        cur.execute("select distinct issue_month from articles")
-        return {row[0] for row in cur.fetchall()}
+        cur.execute("select year, month from sampada")
+        return {f"{year:04d}-{month:02d}" for year, month in cur.fetchall()}
+
+
+def upsert_sampada(
+    conn: psycopg.Connection,
+    *,
+    year: int,
+    month: int,
+    source_pdf_id: str,
+    source_url: Optional[str],
+) -> None:
+    """Create the monthly Sampada row before inserting its articles."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into sampada (year, month, source_pdf_id, source_url)
+            values (%s, %s, %s, %s)
+            on conflict (year, month) do update
+            set source_url = coalesce(excluded.source_url, sampada.source_url)
+            where sampada.source_pdf_id = excluded.source_pdf_id
+            returning source_pdf_id
+            """,
+            (year, month, source_pdf_id, source_url),
+        )
+        if cur.fetchone() is None:
+            raise ValueError(
+                f"issue {year:04d}-{month:02d} already belongs to a different source PDF"
+            )
 
 
 def insert_article(
@@ -61,7 +93,6 @@ def insert_article(
     issue_year: int,
     issue_month_number: int,
     article_index: int,
-    issue_month: str,
     article_title: str,
     author: str,
     body: str,
@@ -72,16 +103,15 @@ def insert_article(
         cur.execute(
             """
             insert into articles
-                (issue_year, issue_month_number, article_index, issue_month,
-                 article_title, author, body, source_url, drive_file_id)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (year, month, article_index, article_title, author, body,
+                 source_url, source_pdf_id)
+            values (%s, %s, %s, %s, %s, %s, %s, %s)
             returning id
             """,
             (
                 issue_year,
                 issue_month_number,
                 article_index,
-                issue_month,
                 article_title,
                 author or None,
                 body,
@@ -93,16 +123,25 @@ def insert_article(
         return row[0]
 
 
-def insert_chunks(conn: psycopg.Connection, article_id: int, chunks: List[str], embeddings: List[List[float]]) -> None:
+def insert_smaller_chunks(
+    conn: psycopg.Connection,
+    *,
+    year: int,
+    month: int,
+    article_index: int,
+    chunks: List[str],
+    embeddings: List[List[float]],
+) -> None:
     assert len(chunks) == len(embeddings), "chunk/embedding count mismatch"
     with conn.cursor() as cur:
         cur.executemany(
             """
-            insert into chunks (article_id, chunk_index, content, embedding)
-            values (%s, %s, %s, %s)
+            insert into smaller_chunks
+                (year, month, article_index, chunk_index, content, embedding)
+            values (%s, %s, %s, %s, %s, %s)
             """,
             [
-                (article_id, i, content, embedding)
+                (year, month, article_index, i, content, embedding)
                 for i, (content, embedding) in enumerate(zip(chunks, embeddings))
             ],
         )
@@ -115,7 +154,6 @@ def write_article(
     issue_year: int,
     issue_month_number: int,
     article_index: int,
-    issue_month: str,
     source_url: Optional[str],
     drive_file_id: str,
 ) -> int:
@@ -127,7 +165,6 @@ def write_article(
         issue_year=issue_year,
         issue_month_number=issue_month_number,
         article_index=article_index,
-        issue_month=issue_month,
         article_title=article.title,
         author=article.author,
         body=article.body,
@@ -138,6 +175,13 @@ def write_article(
     chunks = chunk_text(article.body)
     if chunks:
         embeddings = embed_texts(chunks, task_type="RETRIEVAL_DOCUMENT")
-        insert_chunks(conn, article_id, chunks, embeddings)
+        insert_smaller_chunks(
+            conn,
+            year=issue_year,
+            month=issue_month_number,
+            article_index=article_index,
+            chunks=chunks,
+            embeddings=embeddings,
+        )
 
     return article_id

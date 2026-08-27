@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -20,7 +21,13 @@ from dotenv import load_dotenv
 
 from db.connection import connect
 from ingest.config import local_staging_dir
-from ingest.db_writer import already_ingested, ingested_issue_months, issue_month_source, write_article
+from ingest.db_writer import (
+    already_ingested,
+    ingested_issue_months,
+    issue_month_source,
+    upsert_sampada,
+    write_article,
+)
 from ingest.detect_issue_boundaries import IssueBoundary, IssueBoundaryError, split_into_issues
 from ingest.drive_sync import load_drive_ids, sync_all
 from ingest.extract_text import extract_pages, full_text
@@ -29,7 +36,27 @@ from ingest.split_articles import ArticleSplitError, split_issue_into_articles
 from ingest.web_archive import check_for_new_issues, lookup_source_url
 
 
-def process_pdf(pdf_path: Path, drive_file_id: str, force: bool = False) -> int:
+FULLY_PROCESSED_FILENAME = ".fully_processed.json"
+
+
+def _fully_processed_path(staging_dir: Path) -> Path:
+    return staging_dir / FULLY_PROCESSED_FILENAME
+
+
+def _load_fully_processed(staging_dir: Path) -> set:
+    path = _fully_processed_path(staging_dir)
+    if not path.exists():
+        return set()
+    return set(json.loads(path.read_text()))
+
+
+def _mark_fully_processed(staging_dir: Path, drive_file_id: str) -> None:
+    drive_file_ids = _load_fully_processed(staging_dir)
+    drive_file_ids.add(drive_file_id)
+    _fully_processed_path(staging_dir).write_text(json.dumps(sorted(drive_file_ids), indent=2))
+
+
+def process_pdf(pdf_path: Path, drive_file_id: str, staging_dir: Path, force: bool = False) -> int:
     """Returns the number of issues newly written from this PDF.
 
     A single PDF can bundle several issues (see extract_text.py and
@@ -38,7 +65,19 @@ def process_pdf(pdf_path: Path, drive_file_id: str, force: bool = False) -> int:
     (its own resumability check, its own article-splitting call, its own
     short-lived DB connection for the write), so one bad issue doesn't take
     down the others bound in the same file.
+
+    Which issue_months a file contains is only knowable after OCR'ing it
+    (the boundaries live in the scanned pages themselves), so the per-issue
+    already_ingested() check alone can't skip OCR on a rerun. Once every
+    issue detected in a file resolves cleanly (written, or already in the
+    database), that drive_file_id is recorded in FULLY_PROCESSED_FILENAME so
+    a later rerun can skip OCR for it entirely -- a file with anything sent
+    to manual review is deliberately left off that list, so it's retried.
     """
+    if not force and drive_file_id in _load_fully_processed(staging_dir):
+        print(f"[SKIP] {pdf_path.name}: already fully processed (use --force to reprocess)")
+        return 0
+
     pages = extract_pages(pdf_path)
 
     try:
@@ -48,10 +87,14 @@ def process_pdf(pdf_path: Path, drive_file_id: str, force: bool = False) -> int:
         print(f"[SKIP] {pdf_path.name}: issue-boundary detection failed, logged for manual review")
         return 0
 
-    processed = sum(
+    outcomes = [
         _process_one_issue(pdf_path, drive_file_id, boundary, issue_pages, force=force)
         for boundary, issue_pages in issues
-    )
+    ]
+    processed = sum(1 for written, _resolved in outcomes if written)
+
+    if all(resolved for _written, resolved in outcomes):
+        _mark_fully_processed(staging_dir, drive_file_id)
 
     print(f"[OK] {pdf_path.name} -> {len(issues)} issue(s) detected, {processed} newly processed")
     return processed
@@ -59,8 +102,12 @@ def process_pdf(pdf_path: Path, drive_file_id: str, force: bool = False) -> int:
 
 def _process_one_issue(
     pdf_path: Path, drive_file_id: str, boundary: IssueBoundary, issue_pages: list, force: bool
-) -> bool:
-    """Returns True if this one issue was newly written, False if skipped."""
+) -> tuple:
+    """Returns (written, resolved). `written` is True if this issue was
+    newly written this run. `resolved` is True if this issue_month is now
+    durably settled for this file -- written, or confirmed already in the
+    database -- versus False for anything logged to manual review, which
+    should still be retried on the next run (see process_pdf)."""
     issue_month = f"{boundary.year:04d}-{boundary.month:02d}"
     log_prefix = f"{pdf_path.name} {issue_month}"
 
@@ -68,7 +115,7 @@ def _process_one_issue(
     try:
         if not force and already_ingested(conn, drive_file_id, issue_month):
             print(f"[SKIP] {log_prefix}: already in the database (use --force to reprocess)")
-            return False
+            return False, True
 
         existing_source = issue_month_source(conn, issue_month)
         if existing_source and existing_source != drive_file_id:
@@ -79,7 +126,7 @@ def _process_one_issue(
                 f"skipped rather than double-writing this issue",
             )
             print(f"[SKIP] {log_prefix}: already ingested from a different source PDF, logged for manual review")
-            return False
+            return False, False
     finally:
         conn.close()
 
@@ -95,12 +142,12 @@ def _process_one_issue(
     except ArticleSplitError as exc:
         log_manual_review(pdf_path.name, f"{issue_month}: Gemini returned malformed article boundaries twice: {exc}")
         print(f"[SKIP] {log_prefix}: article splitting failed, logged for manual review")
-        return False
+        return False, False
 
     if not articles:
         log_manual_review(pdf_path.name, f"{issue_month}: Gemini returned zero article boundaries")
         print(f"[SKIP] {log_prefix}: no articles detected, logged for manual review")
-        return False
+        return False, False
 
     # Supplementary cross-check, 2021+ only -- see ingest/web_archive.py.
     source_url = lookup_source_url(issue_month) if boundary.year >= 2021 else None
@@ -110,9 +157,17 @@ def _process_one_issue(
         if force:
             with conn.cursor() as cur:
                 cur.execute(
-                    "delete from articles where drive_file_id = %s and issue_month = %s",
-                    (drive_file_id, issue_month),
+                    "delete from sampada where source_pdf_id = %s and year = %s and month = %s",
+                    (drive_file_id, boundary.year, boundary.month),
                 )
+
+        upsert_sampada(
+            conn,
+            year=boundary.year,
+            month=boundary.month,
+            source_pdf_id=drive_file_id,
+            source_url=source_url,
+        )
 
         for article_index, article in enumerate(articles, start=1):
             write_article(
@@ -121,7 +176,6 @@ def _process_one_issue(
                 issue_year=boundary.year,
                 issue_month_number=boundary.month,
                 article_index=article_index,
-                issue_month=issue_month,
                 source_url=source_url,
                 drive_file_id=drive_file_id,
             )
@@ -133,7 +187,7 @@ def _process_one_issue(
         conn.close()
 
     print(f"[OK] {log_prefix}: {len(articles)} articles")
-    return True
+    return True, True
 
 
 def cmd_sync(_args) -> None:
@@ -176,7 +230,7 @@ def cmd_process(args) -> None:
         # process_pdf rolls back its own half-done write transaction; log
         # and keep going. Re-running afterward resumes cleanly either way.
         try:
-            process_pdf(pdf_path, drive_file_id, force=args.force)
+            process_pdf(pdf_path, drive_file_id, staging_dir, force=args.force)
         except Exception as exc:
             log_manual_review(pdf_path.name, f"unexpected error: {exc}")
             print(f"[SKIP] {pdf_path.name}: unexpected error, logged for manual review: {exc}")

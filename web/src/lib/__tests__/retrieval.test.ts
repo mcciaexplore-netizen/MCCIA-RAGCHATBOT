@@ -26,17 +26,18 @@ describe("search", () => {
     expect(results).toEqual([SAMPLE_ROW]);
   });
 
-  it("does not filter by issue_month for an open-scope query", async () => {
+  it("does not filter by year/month for an open-scope query", async () => {
     const { sql, calls } = fakeSql([SAMPLE_ROW]);
     await search([0.1], { scope: "open" }, { client: sql });
-    expect(calls[0].text).not.toContain("where a.issue_month");
+    expect(calls[0].text).not.toContain("where c.year");
   });
 
-  it("filters by issue_month for an issue-scoped query", async () => {
+  it("filters by numeric year and month for an issue-scoped query", async () => {
     const { sql, calls } = fakeSql([SAMPLE_ROW]);
     await search([0.1], { scope: "issue", issueMonth: "2021-06" }, { client: sql });
-    expect(calls[0].text).toContain("where a.issue_month");
-    expect(calls[0].values).toContain("2021-06");
+    expect(calls[0].text).toContain("where c.year = ? and c.month = ?");
+    expect(calls[0].values).toContain(2021);
+    expect(calls[0].values).toContain(6);
   });
 
   it("formats the embedding as a bracketed vector literal", async () => {
@@ -45,10 +46,13 @@ describe("search", () => {
     expect(calls[0].values).toContain("[0.1,0.25,-0.5]");
   });
 
-  it("joins chunks to articles so every row carries the article id, issue_month, and article_title", async () => {
+  it("joins smaller chunks by the complete article coordinate", async () => {
     const { sql, calls } = fakeSql([]);
     await search([0.1], { scope: "open" }, { client: sql });
-    expect(calls[0].text).toContain("join articles a on a.id = c.article_id");
+    expect(calls[0].text).toContain("from smaller_chunks c");
+    expect(calls[0].text).toContain("a.year = c.year");
+    expect(calls[0].text).toContain("a.month = c.month");
+    expect(calls[0].text).toContain("a.article_index = c.article_index");
     expect(calls[0].text).toContain('"articleId"');
     expect(calls[0].text).toContain('"issueMonth"');
     expect(calls[0].text).toContain('"articleTitle"');

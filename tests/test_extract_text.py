@@ -8,6 +8,7 @@ from ingest.extract_text import (
     _parse_batch,
     extract_pages,
     full_text,
+    iter_page_image_batches,
     render_page_images,
 )
 
@@ -61,6 +62,18 @@ def test_render_page_images_returns_one_png_per_page(tmp_path):
     assert len(images) == 3
     for image_bytes in images:
         assert image_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_iter_page_image_batches_limits_each_rendered_batch(tmp_path):
+    pdf_path = tmp_path / "bound-volume.pdf"
+    _make_pdf(pdf_path, num_pages=8)
+
+    batches = iter_page_image_batches(pdf_path, batch_size=3)
+
+    first = next(batches)
+    assert len(first) == 3
+    assert all(image[:8] == b"\x89PNG\r\n\x1a\n" for image in first)
+    assert [len(batch) for batch in batches] == [3, 2]
 
 
 def test_parse_batch_returns_texts_in_page_number_order():

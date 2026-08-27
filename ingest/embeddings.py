@@ -22,6 +22,7 @@ from google.genai import types
 
 from db.config import gemini_api_key
 from ingest.config import EMBEDDING_DIMENSIONS, GEMINI_EMBED_MODEL
+from ingest.gemini_retry import call_with_retry
 from ingest.usage_tracker import CHARS_PER_TOKEN_ESTIMATE, log_usage
 
 # Keeps individual requests well within payload/token limits regardless of
@@ -41,12 +42,15 @@ def _normalize(vector: List[float]) -> List[float]:
 
 
 def _embed_batch(texts: List[str], task_type: str, client: genai.Client) -> List[List[float]]:
-    result = client.models.embed_content(
-        model=GEMINI_EMBED_MODEL,
-        contents=texts,
-        config=types.EmbedContentConfig(
-            task_type=task_type,
-            output_dimensionality=EMBEDDING_DIMENSIONS,
+    result = call_with_retry(
+        "embedding",
+        lambda: client.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=texts,
+            config=types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=EMBEDDING_DIMENSIONS,
+            ),
         ),
     )
     metadata = getattr(result, "metadata", None)

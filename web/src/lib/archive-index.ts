@@ -13,9 +13,9 @@ type ArticleRow = {
 };
 
 /** Pure grouping of flat article rows into issues -- no network access, so
- * it's unit-testable directly. Rows are expected newest-issue-first (see
- * the ORDER BY in getBrowseIndex); a Map preserves that insertion order,
- * so no separate sort is needed here.
+ * it's unit-testable directly. Rows are expected oldest-issue-first (see
+ * the ORDER BY in getBrowseIndex), chronological 1945 onward; a Map
+ * preserves that insertion order, so no separate sort is needed here.
  */
 export function groupIntoIssues(rows: ArticleRow[]): BrowseIssue[] {
   const byMonth = new Map<string, BrowseIssue>();
@@ -59,7 +59,7 @@ export async function getBrowseIndex(
       a.article_title as "articleTitle",
       a.source_url as "sourceUrl"
     from articles a
-    order by a.issue_month desc, a.article_title asc
+    order by a.issue_month asc, a.article_index asc
   `) as ArticleRow[];
 
   return { issues: groupIntoIssues(rows) };

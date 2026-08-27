@@ -58,8 +58,10 @@ def ingested_issue_months(conn: psycopg.Connection) -> Set[str]:
 def insert_article(
     conn: psycopg.Connection,
     *,
-    issue_month: str,
     issue_year: int,
+    issue_month_number: int,
+    article_index: int,
+    issue_month: str,
     article_title: str,
     author: str,
     body: str,
@@ -70,13 +72,16 @@ def insert_article(
         cur.execute(
             """
             insert into articles
-                (issue_month, issue_year, article_title, author, body, source_url, drive_file_id)
-            values (%s, %s, %s, %s, %s, %s, %s)
+                (issue_year, issue_month_number, article_index, issue_month,
+                 article_title, author, body, source_url, drive_file_id)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             returning id
             """,
             (
-                issue_month,
                 issue_year,
+                issue_month_number,
+                article_index,
+                issue_month,
                 article_title,
                 author or None,
                 body,
@@ -107,8 +112,10 @@ def write_article(
     conn: psycopg.Connection,
     article: Article,
     *,
-    issue_month: str,
     issue_year: int,
+    issue_month_number: int,
+    article_index: int,
+    issue_month: str,
     source_url: Optional[str],
     drive_file_id: str,
 ) -> int:
@@ -117,8 +124,10 @@ def write_article(
     """
     article_id = insert_article(
         conn,
-        issue_month=issue_month,
         issue_year=issue_year,
+        issue_month_number=issue_month_number,
+        article_index=article_index,
+        issue_month=issue_month,
         article_title=article.title,
         author=article.author,
         body=article.body,

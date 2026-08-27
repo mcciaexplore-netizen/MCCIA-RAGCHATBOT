@@ -5,6 +5,7 @@ python-dotenv) so the same code runs locally and in a scheduled job.
 """
 
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 
 def _env(name: str, default: str = "") -> str:
@@ -20,6 +21,34 @@ def database_url() -> str:
             "(the pooled one) in .env."
         )
     return value
+
+
+def migration_database_url() -> str:
+    """Return a direct Neon connection for schema migrations.
+
+    DATABASE_URL stays pooled for application traffic. Neon direct URLs are
+    the same endpoint without the ``-pooler`` hostname suffix, so derive that
+    form when DATABASE_URL_UNPOOLED has not been supplied explicitly.
+    """
+    explicit = _env("DATABASE_URL_UNPOOLED")
+    if explicit:
+        return explicit
+
+    pooled = database_url()
+    parts = urlsplit(pooled)
+    hostname = parts.hostname
+    if not hostname or "-pooler" not in hostname:
+        return pooled
+
+    direct_hostname = hostname.replace("-pooler", "", 1)
+    userinfo, separator, host_and_port = parts.netloc.rpartition("@")
+    direct_host_and_port = host_and_port.replace(hostname, direct_hostname, 1)
+    direct_netloc = (
+        f"{userinfo}{separator}{direct_host_and_port}"
+        if separator
+        else direct_host_and_port
+    )
+    return urlunsplit(parts._replace(netloc=direct_netloc))
 
 
 def gemini_api_key() -> str:

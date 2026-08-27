@@ -7,6 +7,7 @@ Usage:
     python -m ingest.run_pipeline sync              # pull PDFs from Drive
     python -m ingest.run_pipeline process            # extract+split+embed+write
     python -m ingest.run_pipeline process --force    # reprocess even if already ingested
+    python -m ingest.run_pipeline process --start-at "1949 April.PDF"
     python -m ingest.run_pipeline check-web          # log web issues not yet ingested
     python -m ingest.run_pipeline all                # sync, process, check-web
 """
@@ -113,12 +114,14 @@ def _process_one_issue(
                     (drive_file_id, issue_month),
                 )
 
-        for article in articles:
+        for article_index, article in enumerate(articles, start=1):
             write_article(
                 conn,
                 article,
-                issue_month=issue_month,
                 issue_year=boundary.year,
+                issue_month_number=boundary.month,
+                article_index=article_index,
+                issue_month=issue_month,
                 source_url=source_url,
                 drive_file_id=drive_file_id,
             )
@@ -141,6 +144,22 @@ def cmd_sync(_args) -> None:
 def cmd_process(args) -> None:
     staging_dir = local_staging_dir()
     pdfs = sorted(staging_dir.glob("*.[pP][dD][fF]"))
+    available_by_name = {pdf.name: pdf for pdf in pdfs}
+    requested_files = set(getattr(args, "files", None) or [])
+    if requested_files:
+        missing = sorted(requested_files - available_by_name.keys())
+        if missing:
+            print(f"Requested PDF(s) not found in {staging_dir}: {', '.join(missing)}")
+            return
+        pdfs = [available_by_name[name] for name in sorted(requested_files)]
+
+    start_at = getattr(args, "start_at", None)
+    if start_at:
+        if start_at not in available_by_name:
+            print(f"Starting PDF not found in {staging_dir}: {start_at}")
+            return
+        pdfs = [pdf for pdf in pdfs if pdf.name >= start_at]
+
     if not pdfs:
         print(f"No PDFs found in {staging_dir}")
         return
@@ -190,6 +209,16 @@ def main() -> None:
 
     p_process = sub.add_parser("process", help="Extract, split, embed, and write articles to Postgres")
     p_process.add_argument("--force", action="store_true", help="Reprocess even if already in the database")
+    p_process.add_argument(
+        "--file",
+        dest="files",
+        action="append",
+        help="Process only this exact staged PDF filename; repeat for multiple files",
+    )
+    p_process.add_argument(
+        "--start-at",
+        help="Resume the sorted archive at this exact staged PDF filename (inclusive)",
+    )
     p_process.set_defaults(func=cmd_process)
 
     p_check_web = sub.add_parser(

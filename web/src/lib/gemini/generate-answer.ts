@@ -34,7 +34,7 @@ Rules:
 - If the excerpts span multiple issues, synthesize across them and say which issue each fact comes from.
 - After every factual claim, cite it inline as: (Sampada, <Month Year>, "<Article Title>") -- in answer_mr, keep the "Sampada" label and article title as printed, but the surrounding sentence in Marathi. Use exactly the issue and title labeled on each excerpt below -- never invent a date or title that isn't shown there.
 - If the excerpts don't contain enough information to answer the question, say so plainly in both answer_en and answer_mr instead of guessing, and leave cited_excerpt_numbers empty.
-- Keep your answer concise. Only go into more depth if the user explicitly asks for it.`;
+- Default to SHORT: 2-4 sentences, one flowing paragraph, no headers or bullet list, covering only the most important facts. Only write a longer, itemized answer when the question explicitly asks to "summarize," "list," or "give details" -- most questions don't need that.`;
 
 const ANSWER_JSON_SCHEMA = {
   type: "object",
@@ -126,11 +126,15 @@ export async function generateAnswer(
     client?: GoogleGenAI;
     limit?: number;
     dbClient?: NeonQueryFunction<false, false>;
+    // Lets the caller compute this concurrently with classifyQuery (they're
+    // independent) instead of paying for that round trip serially on top of
+    // this one -- see route.ts.
+    embedding?: number[];
   }
 ): Promise<AnswerResult> {
   const client = opts?.client ?? buildGeminiClient();
 
-  const embedding = await embedQuery(question, { client });
+  const embedding = opts?.embedding ?? (await embedQuery(question, { client }));
   const chunks = await search(embedding, route, { limit: opts?.limit, client: opts?.dbClient });
 
   if (chunks.length === 0) {
@@ -146,6 +150,12 @@ export async function generateAnswer(
       mime_type: "application/json",
       schema: ANSWER_JSON_SCHEMA,
     },
+    // gemini-3.7-flash thinks by default, which measurably adds latency on
+    // every chat request for little benefit here -- the task is bounded
+    // (answer strictly from the given excerpts, cite by excerpt number),
+    // not open-ended reasoning. "low" trims that overhead while still
+    // leaving some budget for getting excerpt numbers right.
+    generation_config: { thinking_level: "low" },
   });
 
   return parseAnswer(interaction.output_text, chunks);

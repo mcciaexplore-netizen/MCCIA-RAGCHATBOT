@@ -113,11 +113,41 @@ def test_process_writes_articles_for_a_single_detected_issue(tmp_path, monkeypat
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 1
     _, params = insert_calls[0]
-    assert params[0] == "2021-06"  # issue_month
-    assert params[1] == 2021  # issue_year
-    assert params[2] == "Editorial"  # article_title
-    assert params[6] == "drive-abc123"  # drive_file_id
+    assert params[0] == 2021  # issue_year
+    assert params[1] == 6  # issue_month_number
+    assert params[2] == 1  # article_index
+    assert params[3] == "2021-06"  # canonical issue_month key
+    assert params[4] == "Editorial"  # article_title
+    assert params[8] == "drive-abc123"  # drive_file_id
     assert fake_conn.commits == 1
+
+
+def test_process_assigns_one_based_article_indexes_within_an_issue(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "Sampada_June_2021.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"Sampada_June_2021.pdf": "drive-abc123"}')
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    articles = [
+        Article(title="Editorial", author="", body="Opening article."),
+        Article(title="Industry News", author="", body="Second article."),
+        Article(title="Member Notes", author="", body="Third article."),
+    ]
+
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        cmd_process(_Args())
+
+    insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
+    assert [params[0:3] for _, params in insert_calls] == [
+        (2021, 6, 1),
+        (2021, 6, 2),
+        (2021, 6, 3),
+    ]
 
 
 def test_process_writes_every_issue_bundled_in_one_pdf(tmp_path, monkeypatch):
@@ -149,7 +179,7 @@ def test_process_writes_every_issue_bundled_in_one_pdf(tmp_path, monkeypatch):
 
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 2
-    issue_months = {params[0] for _, params in insert_calls}
+    issue_months = {params[3] for _, params in insert_calls}
     assert issue_months == {"1945-07", "1946-01"}
     assert fake_conn.commits == 2  # one commit per issue, not one for the whole PDF
 
@@ -180,7 +210,7 @@ def test_process_one_bad_issue_does_not_block_the_others_in_the_same_pdf(tmp_pat
 
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 1
-    assert insert_calls[0][1][0] == "1945-07"
+    assert insert_calls[0][1][3] == "1945-07"
 
 
 def test_process_logs_manual_review_when_issue_boundaries_undetectable(tmp_path, monkeypatch):
@@ -293,6 +323,62 @@ def test_process_skips_pdf_with_no_drive_id_on_record(tmp_path, monkeypatch):
         fake_split.assert_not_called()
 
     assert fake_conn.executed == []
+
+
+def test_process_can_retry_only_selected_failed_files(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "1945 July.PDF").write_bytes(b"")
+    (staging / "1946 April.PDF").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text(
+        '{"1945 July.PDF": "drive-1945", "1946 April.PDF": "drive-1946"}'
+    )
+
+    class _SelectedArgs:
+        force = False
+        files = ["1946 April.PDF"]
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=1946, month=4)
+    articles = [Article(title="Editorial", author="", body="April issue.")]
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6] as extract:
+        cmd_process(_SelectedArgs())
+
+    extract.assert_called_once_with(staging / "1946 April.PDF")
+    insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
+    assert len(insert_calls) == 1
+    assert insert_calls[0][1][0:3] == (1946, 4, 1)
+
+
+def test_process_can_resume_from_an_exact_sorted_pdf(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    for name in ("1948 May.PDF", "1949 April.PDF"):
+        (staging / name).write_bytes(b"")
+    (staging / ".drive_ids.json").write_text(
+        '{"1948 May.PDF":"drive-1948","1949 April.PDF":"drive-1949"}'
+    )
+
+    class _ResumeArgs:
+        force = False
+        start_at = "1949 April.PDF"
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=1949, month=4)
+    articles = [Article(title="Editorial", author="", body="April issue.")]
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6] as extract:
+        cmd_process(_ResumeArgs())
+
+    assert extract.call_args_list[0].args[0] == staging / "1949 April.PDF"
+    assert all(call.args[0].name != "1948 May.PDF" for call in extract.call_args_list)
 
 
 def test_check_web_passes_ingested_months_from_the_database(tmp_path, monkeypatch):

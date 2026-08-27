@@ -115,6 +115,14 @@ def sync_all(dest_dir: Optional[Path] = None, service=None) -> list:
     """Downloads every PDF under the configured Drive folder that isn't
     already present locally at the same size. Returns the list of local
     paths for files it downloaded (skips already-present files).
+
+    The full archive is tens of gigabytes and can take a long time to pull
+    down, so .drive_ids.json is saved after every file rather than once at
+    the end -- `process` reads it to resolve each local PDF's drive_file_id
+    (see run_pipeline.cmd_process), and waiting for the whole sync to finish
+    before any processing could start would double the total wait for no
+    reason: a `process` run against whatever's downloaded so far can safely
+    run concurrently with the rest of this sync.
     """
     dest_dir = dest_dir or local_staging_dir()
     service = service or build_drive_service()
@@ -124,10 +132,11 @@ def sync_all(dest_dir: Optional[Path] = None, service=None) -> list:
         drive_ids[f.name] = f.file_id
         dest = dest_dir / f.name
         if dest.exists() and dest.stat().st_size == f.size:
+            _save_drive_ids(dest_dir, drive_ids)
             continue
         download_file(service, f.file_id, dest)
         downloaded.append(dest)
-    _save_drive_ids(dest_dir, drive_ids)
+        _save_drive_ids(dest_dir, drive_ids)
     return downloaded
 
 

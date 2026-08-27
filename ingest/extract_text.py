@@ -12,7 +12,7 @@ rasterized and transcribed instead of reading a text layer.
 
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import pymupdf
 from google import genai
@@ -21,6 +21,7 @@ from pydantic import BaseModel, ValidationError
 
 from db.config import gemini_api_key
 from ingest.config import GEMINI_OCR_MODEL, OCR_PAGE_BATCH_SIZE, OCR_PAGE_DPI
+from ingest.gemini_retry import call_with_retry
 from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You transcribe scanned pages from Sampada, an Indian \
@@ -66,19 +67,42 @@ def render_page_images(pdf_path: Path, dpi: int = OCR_PAGE_DPI) -> List[bytes]:
         return [page.get_pixmap(dpi=dpi).tobytes("png") for page in doc]
 
 
+def iter_page_image_batches(
+    pdf_path: Path,
+    *,
+    dpi: int = OCR_PAGE_DPI,
+    batch_size: int = OCR_PAGE_BATCH_SIZE,
+) -> Iterator[List[bytes]]:
+    """Rasterize one OCR batch at a time instead of holding a bound
+    volume's rendered pages in memory all at once."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
+    with pymupdf.open(pdf_path) as doc:
+        for start in range(0, len(doc), batch_size):
+            end = min(start + batch_size, len(doc))
+            yield [
+                doc[page_number].get_pixmap(dpi=dpi).tobytes("png")
+                for page_number in range(start, end)
+            ]
+
+
 def _call_gemini(batch_images: List[bytes], client: genai.Client) -> Optional[str]:
     contents: List[object] = []
     for i, image_bytes in enumerate(batch_images, start=1):
         contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/png"))
         contents.append(f"^ that image is page_number {i}")
 
-    response = client.models.generate_content(
-        model=GEMINI_OCR_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            response_schema=_PagesOut,
+    response = call_with_retry(
+        "OCR",
+        lambda: client.models.generate_content(
+            model=GEMINI_OCR_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=_PagesOut,
+            ),
         ),
     )
     usage = getattr(response, "usage_metadata", None)
@@ -145,11 +169,9 @@ def _ocr_batch(batch_images: List[bytes], client: genai.Client) -> List[str]:
 def extract_pages(pdf_path: Path, client: Optional[genai.Client] = None) -> List[str]:
     """Returns OCR'd text for each page, in order."""
     client = client or _client()
-    images = render_page_images(pdf_path)
 
     pages: List[str] = []
-    for i in range(0, len(images), OCR_PAGE_BATCH_SIZE):
-        batch = images[i : i + OCR_PAGE_BATCH_SIZE]
+    for batch in iter_page_image_batches(pdf_path):
         pages.extend(_ocr_batch(batch, client))
     return pages
 

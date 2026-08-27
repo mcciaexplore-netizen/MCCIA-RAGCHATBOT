@@ -6,7 +6,8 @@ import type { BrowseIssue } from "@/lib/types";
 
 export function ArchiveBrowser({ issues }: { issues: BrowseIssue[] }) {
   const years = useMemo(
-    () => Array.from(new Set(issues.map((issue) => issue.year))).sort((a, b) => b - a),
+    // Chronological, 1945 onward, matching the issue list below.
+    () => Array.from(new Set(issues.map((issue) => issue.year))).sort((a, b) => a - b),
     [issues]
   );
   const [selectedYear, setSelectedYear] = useState<number | "all">("all");

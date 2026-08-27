@@ -47,7 +47,9 @@ cp .env.example .env   # then fill in GEMINI_API_KEY, DATABASE_URL, GOOGLE_DRIVE
 
 `DATABASE_URL` is a Neon Postgres connection string (pooled) from a project
 with the `vector` extension available -- Neon enables it on request via
-`create extension vector`, which `db/migrate.py` runs for you.
+`create extension vector`, which `db/migrate.py` runs for you. Migrations use
+`DATABASE_URL_UNPOOLED` when provided; otherwise the migration command derives
+Neon's direct endpoint by removing `-pooler` from the configured hostname.
 
 ## Phase 1: Database setup
 
@@ -55,8 +57,14 @@ with the `vector` extension available -- Neon enables it on request via
 python -m db.migrate
 ```
 
-Applies `db/schema.sql`: enables pgvector, creates `articles` and `chunks`,
-and indexes `articles.issue_month` plus an HNSW index on
+Applies `db/schema.sql` for a fresh database, or the additive coordinate
+migration for an existing database. Articles are addressed by the unique,
+1-based tuple `(issue_year, issue_month_number, article_index)`. Each article
+has one or more chunk rows addressed by `chunk_index`, and every chunk stores a
+1536-dimensional vector. The `sampada_article_vectors` view exposes the query
+shape `year, month, article_index, chunk_index, content, embedding` directly.
+
+The schema indexes `articles.issue_month` plus an HNSW index on
 `chunks.embedding`. Embeddings are stored at 1536 dimensions (requested
 explicitly from `gemini-embedding-001`, whose default is 3072) because
 pgvector's HNSW/IVFFlat indexes cap at 2000 dimensions -- anything wider
@@ -72,6 +80,8 @@ the original build spec about `gemini-embedding-2`'s multimodal embeddings.
 python -m ingest.run_pipeline sync              # pull PDFs from Drive into staging/raw/
 python -m ingest.run_pipeline process            # extract, split, chunk, embed, write to Postgres
 python -m ingest.run_pipeline process --force    # reprocess even if already in the database
+python -m ingest.run_pipeline process --file "1947 April.PDF" # retry one exact staged PDF
+python -m ingest.run_pipeline process --start-at "1949 April.PDF" # resume here (inclusive)
 python -m ingest.run_pipeline all                # sync then process
 ```
 
@@ -97,8 +107,9 @@ Pipeline, per PDF:
    The body is sliced from the *original* extracted text client-side, so
    citations stay byte-exact. A malformed response gets one retry, then the
    PDF is logged to manual review and skipped.
-5. Each article is inserted into `articles`, keeping `drive_file_id` so
-   citations can always trace back to the source PDF. For 2021+ issues,
+5. Each article is inserted into `articles` with its numeric year, month, and
+   1-based position in that issue, keeping `drive_file_id` so citations can
+   always trace back to the source PDF. For 2021+ issues,
    `ingest/web_archive.py` looks up the matching mcciapunesampada.com page
    for `source_url` (best-effort -- a network hiccup never fails the run).
 6. `ingest/chunking.py` splits the body into ~300-token chunks with a ~50
@@ -106,6 +117,16 @@ Pipeline, per PDF:
    `gemini-embedding-001` at 1536 dimensions (batched, L2-normalized per
    Google's guidance for non-default dimensionality) and inserts into
    `chunks`.
+
+Gemini rate limits and temporary server failures (`429`, `500`, `502`,
+`503`, `504`) are retried up to five times with exponential backoff. If a
+PDF still fails, its exact filename is written to `manual_review.csv` and can
+be retried alone with the repeatable `--file` option instead of restarting the
+whole 45 GB archive.
+
+For an interrupted first import, `--start-at` resumes from an exact staged
+filename (inclusive). OCR rasterization is streamed in six-page batches so
+the largest annual bound volumes do not hold every rendered page in memory.
 
 Resumable per Phase 2's spec: `already_ingested()` checks the database
 itself (any article with this Drive file ID) rather than a local manifest,
@@ -186,11 +207,11 @@ running the spec's three acceptance questions for real:
 ## Tests
 
 ```bash
-python -m pytest      # ingestion (Phases 1, 2, 6)
+python -m pytest tests # active Neon ingestion pipeline (Phases 1, 2, 6)
 cd web && npm test    # web app (Phases 3-5, Vitest)
 ```
 
-Python: 64 tests, covering the schema's structure (Phase 1), issue-date
+Python: 106 tests, covering the schema's structure (Phase 1), issue-date
 detection across filename/cover-text formats, PDF text extraction, article
 boundary slicing and Gemini response validation/retry (with a fake client,
 no real API calls), chunking, embedding batching/normalization (fake
@@ -199,7 +220,7 @@ mcciapunesampada.com feed parsing and new-issue diffing (Phases 2 and 6),
 and end-to-end `process`/`check-web`/`all` runs with Gemini and Postgres
 both stubbed.
 
-Web: 54 tests, including Phase 3's classification parsing/fallback behavior,
+Web: 66 tests, including Phase 3's classification parsing/fallback behavior,
 `search()`'s query shape (issue filter present/absent, vector literal
 formatting, the chunks-join-articles select list, default vs. caller-supplied
 limit), Phase 4's query embedding (task type, normalization) and answer

@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from db.config import gemini_api_key
 from ingest.config import GEMINI_SPLIT_MODEL
+from ingest.gemini_retry import call_with_retry
 from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You split one issue of Sampada, an Indian industrial trade \
@@ -83,15 +84,18 @@ def _client() -> genai.Client:
 
 
 def _call_gemini(numbered_text: str, client: genai.Client) -> str:
-    interaction = client.interactions.create(
-        model=GEMINI_SPLIT_MODEL,
-        system_instruction=SYSTEM_PROMPT,
-        input=numbered_text,
-        response_format={
-            "type": "text",
-            "mime_type": "application/json",
-            "schema": _ArticleBoundaries.model_json_schema(),
-        },
+    interaction = call_with_retry(
+        "article splitting",
+        lambda: client.interactions.create(
+            model=GEMINI_SPLIT_MODEL,
+            system_instruction=SYSTEM_PROMPT,
+            input=numbered_text,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": _ArticleBoundaries.model_json_schema(),
+            },
+        ),
     )
     usage = getattr(interaction, "usage", None)
     if usage is not None:

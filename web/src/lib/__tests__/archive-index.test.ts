@@ -42,12 +42,12 @@ describe("groupIntoIssues", () => {
     ]);
   });
 
-  it("preserves row order across issues (newest first, per the SQL's ORDER BY)", () => {
+  it("preserves row order across issues (chronological, oldest first, per the SQL's ORDER BY)", () => {
     const issues = groupIntoIssues([
-      { id: 1, issueMonth: "2021-07", issueYear: 2021, articleTitle: "July piece", sourceUrl: null },
-      { id: 2, issueMonth: "2021-06", issueYear: 2021, articleTitle: "June piece", sourceUrl: null },
+      { id: 1, issueMonth: "2021-06", issueYear: 2021, articleTitle: "June piece", sourceUrl: null },
+      { id: 2, issueMonth: "2021-07", issueYear: 2021, articleTitle: "July piece", sourceUrl: null },
     ]);
-    expect(issues.map((i) => i.issueMonth)).toEqual(["2021-07", "2021-06"]);
+    expect(issues.map((i) => i.issueMonth)).toEqual(["2021-06", "2021-07"]);
   });
 
   it("returns an empty array for no rows", () => {

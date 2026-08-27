@@ -122,8 +122,10 @@ def test_insert_article_returns_new_id():
     conn = _FakeConnection()
     article_id = insert_article(
         conn,
-        issue_month="2021-06",
         issue_year=2021,
+        issue_month_number=6,
+        article_index=1,
+        issue_month="2021-06",
         article_title="Editorial",
         author="Jane Doe",
         body="Welcome to this issue.",
@@ -134,8 +136,10 @@ def test_insert_article_returns_new_id():
     sql, params = conn.executed[-1]
     assert "insert into articles" in sql
     assert params == (
-        "2021-06",
         2021,
+        6,
+        1,
+        "2021-06",
         "Editorial",
         "Jane Doe",
         "Welcome to this issue.",
@@ -148,8 +152,10 @@ def test_insert_article_stores_empty_author_as_null():
     conn = _FakeConnection()
     insert_article(
         conn,
-        issue_month="2021-06",
         issue_year=2021,
+        issue_month_number=6,
+        article_index=1,
+        issue_month="2021-06",
         article_title="Editorial",
         author="",
         body="body",
@@ -157,7 +163,7 @@ def test_insert_article_stores_empty_author_as_null():
         drive_file_id="abc123",
     )
     _, params = conn.executed[-1]
-    assert params[3] is None  # author
+    assert params[5] is None  # author
 
 
 def test_insert_chunks_writes_one_row_per_chunk_in_order():
@@ -185,8 +191,10 @@ def test_write_article_chunks_embeds_and_inserts(monkeypatch):
     article_id = write_article(
         conn,
         article,
-        issue_month="2021-06",
         issue_year=2021,
+        issue_month_number=6,
+        article_index=1,
+        issue_month="2021-06",
         source_url=None,
         drive_file_id="abc123",
     )
@@ -209,8 +217,10 @@ def test_write_article_skips_embedding_when_body_produces_no_chunks(monkeypatch)
     write_article(
         conn,
         article,
-        issue_month="2021-06",
         issue_year=2021,
+        issue_month_number=6,
+        article_index=1,
+        issue_month="2021-06",
         source_url=None,
         drive_file_id="abc123",
     )

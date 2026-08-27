@@ -1,4 +1,4 @@
-"""Apply db/schema.sql to the database at DATABASE_URL.
+"""Create or upgrade the database schema using a direct Neon connection.
 
 Usage:
     python -m db.migrate
@@ -9,18 +9,26 @@ from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
 
-from db.config import database_url
+from db.config import migration_database_url
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 def migrate() -> None:
-    schema_sql = SCHEMA_PATH.read_text()
-    with psycopg.connect(database_url()) as conn:
+    with psycopg.connect(migration_database_url()) as conn:
         with conn.cursor() as cur:
-            cur.execute(schema_sql)
+            cur.execute("select to_regclass('public.articles')")
+            articles_exist = cur.fetchone()[0] is not None
+            migration_paths = (
+                sorted(MIGRATIONS_DIR.glob("*.sql"))
+                if articles_exist
+                else [SCHEMA_PATH]
+            )
+            for migration_path in migration_paths:
+                cur.execute(migration_path.read_text())
         conn.commit()
-    print(f"Applied {SCHEMA_PATH} to the database.")
+    print("Applied: " + ", ".join(str(path) for path in migration_paths))
 
 
 if __name__ == "__main__":

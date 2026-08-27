@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/gemini/client", () => ({
+  buildGeminiClient: vi.fn(() => ({ fake: "client" })),
+}));
+vi.mock("@/lib/gemini/embed", () => ({
+  embedQuery: vi.fn(),
+}));
 vi.mock("@/lib/gemini/query-router", () => ({
   classifyQuery: vi.fn(),
 }));
@@ -7,6 +13,7 @@ vi.mock("@/lib/gemini/generate-answer", () => ({
   generateAnswer: vi.fn(),
 }));
 
+import { embedQuery } from "@/lib/gemini/embed";
 import { generateAnswer } from "@/lib/gemini/generate-answer";
 import { classifyQuery } from "@/lib/gemini/query-router";
 import { POST } from "../route";
@@ -19,13 +26,16 @@ function jsonRequest(body: unknown): Request {
   });
 }
 
+const FAKE_EMBEDDING = [0.1, 0.2, 0.3];
+
 beforeEach(() => {
   vi.mocked(classifyQuery).mockReset();
   vi.mocked(generateAnswer).mockReset();
+  vi.mocked(embedQuery).mockReset().mockResolvedValue(FAKE_EMBEDDING);
 });
 
 describe("POST /api/chat", () => {
-  it("classifies then generates, and returns the issue scope in the response", async () => {
+  it("classifies and embeds concurrently, then generates, and returns the issue scope in the response", async () => {
     vi.mocked(classifyQuery).mockResolvedValue({ scope: "issue", issueMonth: "2021-06" });
     vi.mocked(generateAnswer).mockResolvedValue({
       answerEnglish: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
@@ -40,9 +50,11 @@ describe("POST /api/chat", () => {
     expect(body.scope).toBe("issue");
     expect(body.issueMonth).toBe("2021-06");
     expect(body.citations).toHaveLength(1);
+    expect(embedQuery).toHaveBeenCalledWith("What was in the June 2021 issue?", expect.anything());
     expect(generateAnswer).toHaveBeenCalledWith(
       "What was in the June 2021 issue?",
-      { scope: "issue", issueMonth: "2021-06" }
+      { scope: "issue", issueMonth: "2021-06" },
+      expect.objectContaining({ embedding: FAKE_EMBEDDING })
     );
   });
 

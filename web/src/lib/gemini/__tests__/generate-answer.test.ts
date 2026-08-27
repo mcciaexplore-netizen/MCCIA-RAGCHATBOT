@@ -185,6 +185,26 @@ describe("generateAnswer", () => {
       "answer_mr",
       "cited_excerpt_numbers",
     ]);
+    // gemini-3.7-flash thinks by default -- turned down since this is a
+    // bounded extraction/synthesis task, not open-ended reasoning, and the
+    // extra thinking time was adding several seconds to every chat request.
+    expect(genParams.generation_config).toEqual({ thinking_level: "low" });
+  });
+
+  it("uses a caller-supplied embedding instead of calling Gemini to embed again", async () => {
+    const { client, embedContent, create } = fakeGeminiClient([0.1, 0.2], BILINGUAL_ANSWER);
+    const { dbClient } = fakeDbClient([EDITORIAL]);
+    process.env.GEMINI_API_KEY = "test-key";
+    process.env.DATABASE_URL = "postgres://test";
+
+    await generateAnswer(
+      "What happened in June 2021?",
+      { scope: "issue", issueMonth: "2021-06" },
+      { client, dbClient, embedding: [0.9, 0.9] }
+    );
+
+    expect(embedContent).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it("drops citations for retrieved chunks Gemini didn't actually use", async () => {

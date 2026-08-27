@@ -12,7 +12,7 @@ export default async function ArchivePage() {
       <div className="mx-auto w-full max-w-4xl">
         <h1 className="font-heading text-4xl text-brand-primary">Browse the archive</h1>
         <p className="mt-2 text-brand-text-muted">
-          Every Sampada issue, newest first. Prefer to ask a question instead?{" "}
+          Every Sampada issue, chronological from 1945. Prefer to ask a question instead?{" "}
           <Link href="/" className="text-brand-primary underline hover:text-brand-primary-hover">
             Go back to Ask
           </Link>

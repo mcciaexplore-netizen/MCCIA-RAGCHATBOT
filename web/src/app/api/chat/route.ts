@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { buildGeminiClient } from "@/lib/gemini/client";
+import { embedQuery } from "@/lib/gemini/embed";
 import { generateAnswer } from "@/lib/gemini/generate-answer";
 import { classifyQuery } from "@/lib/gemini/query-router";
 import type { ChatApiResponse } from "@/lib/types";
@@ -21,8 +23,18 @@ export async function POST(request: Request) {
   const { question } = parsed.data;
 
   try {
-    const route = await classifyQuery(question);
-    const { answerEnglish, answerMarathi, citations } = await generateAnswer(question, route);
+    const client = buildGeminiClient();
+    // classifyQuery and embedQuery don't depend on each other -- running
+    // them concurrently instead of serially shaves a full network
+    // round-trip off every request.
+    const [route, embedding] = await Promise.all([
+      classifyQuery(question, { client }),
+      embedQuery(question, { client }),
+    ]);
+    const { answerEnglish, answerMarathi, citations } = await generateAnswer(question, route, {
+      client,
+      embedding,
+    });
 
     const body: ChatApiResponse = {
       answerEnglish,

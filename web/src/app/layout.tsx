@@ -35,7 +35,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             </Link>
             <nav className="flex items-center gap-8 text-sm font-medium">
               <Link href="/archive" className="text-brand-primary hover:text-brand-primary-hover">
-                Browse Issues
+                Browse Sampada
               </Link>
               <span className="text-brand-text-muted">About</span>
               <span className="text-brand-text-muted">How it works</span>

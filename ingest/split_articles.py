@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from db.config import gemini_api_key
 from ingest.config import GEMINI_SPLIT_MODEL
+from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You split one issue of Sampada, an Indian industrial trade \
 magazine, into its individual articles. You are given the issue's text with \
@@ -92,6 +93,14 @@ def _call_gemini(numbered_text: str, client: genai.Client) -> str:
             "schema": _ArticleBoundaries.model_json_schema(),
         },
     )
+    usage = getattr(interaction, "usage", None)
+    if usage is not None:
+        log_usage(
+            GEMINI_SPLIT_MODEL,
+            "split",
+            usage.total_input_tokens or 0,
+            usage.total_output_tokens or 0,
+        )
     return interaction.output_text
 
 

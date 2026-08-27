@@ -10,7 +10,8 @@ export type ParsedCitation = {
 };
 
 export type ChatApiResponse = {
-  answer: string;
+  answerEnglish: string;
+  answerMarathi: string;
   citations: ParsedCitation[];
   scope: "issue" | "open";
   issueMonth: string | null;

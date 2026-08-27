@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 from db.connection import connect
 from ingest.config import local_staging_dir
-from ingest.db_writer import already_ingested, ingested_issue_months, write_article
+from ingest.db_writer import already_ingested, ingested_issue_months, issue_month_source, write_article
 from ingest.detect_issue_boundaries import IssueBoundary, IssueBoundaryError, split_into_issues
 from ingest.drive_sync import load_drive_ids, sync_all
 from ingest.extract_text import extract_pages, full_text
@@ -63,14 +63,24 @@ def _process_one_issue(
     issue_month = f"{boundary.year:04d}-{boundary.month:02d}"
     log_prefix = f"{pdf_path.name} {issue_month}"
 
-    if not force:
-        conn = connect()
-        try:
-            if already_ingested(conn, drive_file_id, issue_month):
-                print(f"[SKIP] {log_prefix}: already in the database (use --force to reprocess)")
-                return False
-        finally:
-            conn.close()
+    conn = connect()
+    try:
+        if not force and already_ingested(conn, drive_file_id, issue_month):
+            print(f"[SKIP] {log_prefix}: already in the database (use --force to reprocess)")
+            return False
+
+        existing_source = issue_month_source(conn, issue_month)
+        if existing_source and existing_source != drive_file_id:
+            log_manual_review(
+                pdf_path.name,
+                f"{issue_month}: already ingested from a different source PDF "
+                f"(drive_file_id={existing_source}) -- likely an overlapping/duplicate scan, "
+                f"skipped rather than double-writing this issue",
+            )
+            print(f"[SKIP] {log_prefix}: already ingested from a different source PDF, logged for manual review")
+            return False
+    finally:
+        conn.close()
 
     text = full_text(issue_pages)
     if len(text) > 400_000:

@@ -25,6 +25,7 @@ from pydantic import BaseModel, ValidationError
 
 from db.config import gemini_api_key
 from ingest.config import GEMINI_SPLIT_MODEL
+from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You split one scanned, bound PDF of Sampada (an Indian \
 industrial trade magazine) into its individual monthly/bi-monthly issues. \
@@ -89,6 +90,14 @@ def _call_gemini(numbered_previews: str, client: genai.Client) -> str:
             "schema": _IssueBoundaries.model_json_schema(),
         },
     )
+    usage = getattr(interaction, "usage", None)
+    if usage is not None:
+        log_usage(
+            GEMINI_SPLIT_MODEL,
+            "boundary",
+            usage.total_input_tokens or 0,
+            usage.total_output_tokens or 0,
+        )
     return interaction.output_text
 
 

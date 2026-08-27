@@ -21,6 +21,7 @@ from pydantic import BaseModel, ValidationError
 
 from db.config import gemini_api_key
 from ingest.config import GEMINI_OCR_MODEL, OCR_PAGE_BATCH_SIZE, OCR_PAGE_DPI
+from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You transcribe scanned pages from Sampada, an Indian \
 industrial trade magazine. This is authorized digitization of MCCIA's own \
@@ -30,8 +31,10 @@ Each input image is one page, labeled with its page_number immediately \
 after it.
 
 Rules:
-- Transcribe exactly as printed, preserving the original script (Marathi/
-Devanagari, English, or a mix) -- never translate or summarize.
+- Transcribe exactly as printed, preserving the original script and language
+(Marathi, Hindi, English, or a mix -- Marathi and Hindi both print in
+Devanagari, so transcribe the Devanagari text exactly as shown rather than
+guessing which of the two it is) -- never translate or summarize.
 - Preserve headlines, paragraph breaks, and reading order as they appear on
 the page.
 - A page that's blank, or contains only an image/ad with no real text, gets
@@ -78,6 +81,14 @@ def _call_gemini(batch_images: List[bytes], client: genai.Client) -> Optional[st
             response_schema=_PagesOut,
         ),
     )
+    usage = getattr(response, "usage_metadata", None)
+    if usage is not None:
+        log_usage(
+            GEMINI_OCR_MODEL,
+            "ocr",
+            usage.prompt_token_count or 0,
+            usage.candidates_token_count or 0,
+        )
     # None when Gemini stops generating without full text -- most commonly
     # finish_reason RECITATION, which can trip on dense, verbatim-looking
     # transcription of old print text even when it's legitimate. Bubbling

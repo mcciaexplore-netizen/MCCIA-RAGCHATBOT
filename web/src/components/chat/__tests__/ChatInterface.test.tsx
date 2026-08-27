@@ -22,13 +22,14 @@ describe("ChatInterface", () => {
     render(<ChatInterface />);
     expect(screen.getByRole("heading", { name: /ask\s*mccia/i })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "What initiatives has MCCIA undertaken for MSMEs?" })
+      screen.getByRole("button", { name: "How has MCCIA supported its members over the years?" })
     ).toBeInTheDocument();
   });
 
   it("sends the typed question, then renders the answer and its citations", async () => {
     const response: ChatApiResponse = {
-      answer: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
+      answerEnglish: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
+      answerMarathi: 'MCCIA ने रोबोटिक्सवर काम केले (Sampada, June 2021, "Editorial").',
       citations: [{ articleId: 1, articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "" }],
       scope: "issue",
       issueMonth: "2021-06",
@@ -45,6 +46,9 @@ describe("ChatInterface", () => {
     await waitFor(() => expect(screen.getByText(/MCCIA covered robotics/)).toBeInTheDocument());
     expect(screen.getByText("June 2021 — Editorial")).toBeInTheDocument();
 
+    await user.click(screen.getByRole("button", { name: "मराठी" }));
+    expect(screen.getByText(/MCCIA ने रोबोटिक्सवर काम केले/)).toBeInTheDocument();
+
     expect(fetch).toHaveBeenCalledWith(
       "/api/chat",
       expect.objectContaining({
@@ -56,14 +60,14 @@ describe("ChatInterface", () => {
 
   it("clicking an example question asks it directly", async () => {
     vi.mocked(fetch).mockResolvedValue(
-      jsonResponse({ answer: "answer", citations: [], scope: "open", issueMonth: null })
+      jsonResponse({ answerEnglish: "answer", answerMarathi: "उत्तर", citations: [], scope: "open", issueMonth: null })
     );
     const user = userEvent.setup();
     render(<ChatInterface />);
 
-    await user.click(screen.getByRole("button", { name: "What initiatives has MCCIA undertaken for MSMEs?" }));
+    await user.click(screen.getByRole("button", { name: "How has MCCIA supported its members over the years?" }));
 
-    expect(screen.getByText("What initiatives has MCCIA undertaken for MSMEs?")).toBeInTheDocument();
+    expect(screen.getByText("How has MCCIA supported its members over the years?")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("answer")).toBeInTheDocument());
   });
 
@@ -106,7 +110,9 @@ describe("ChatInterface", () => {
     expect(screen.getByRole("button", { name: "Ask" })).toBeDisabled();
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
 
-    resolveFetch(jsonResponse({ answer: "done", citations: [], scope: "open", issueMonth: null }));
+    resolveFetch(
+      jsonResponse({ answerEnglish: "done", answerMarathi: "पूर्ण", citations: [], scope: "open", issueMonth: null })
+    );
     await waitFor(() => expect(screen.getByText("done")).toBeInTheDocument());
 
     // The input was cleared after submit, so the button is disabled again --

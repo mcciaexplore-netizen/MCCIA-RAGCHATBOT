@@ -28,7 +28,10 @@ class _FakeCursor:
     def execute(self, sql, params=None):
         sql_norm = sql.strip()
         self._conn.executed.append((sql_norm, params))
-        if "select 1 from articles" in sql_norm:
+        if "select drive_file_id from articles where issue_month" in sql_norm:
+            matches = [drive_id for drive_id, month in self._conn.existing_keys if month == params[0]]
+            self._conn.next_fetchone = (matches[0],) if matches else None
+        elif "select 1 from articles" in sql_norm:
             key = (params[0], params[1])
             self._conn.next_fetchone = (1,) if key in self._conn.existing_keys else None
         elif "insert into articles" in sql_norm:
@@ -219,6 +222,34 @@ def test_process_skips_an_issue_already_in_the_database(tmp_path, monkeypatch):
         fake_split.assert_not_called()
 
     assert not any("insert into articles" in e[0] for e in fake_conn.executed)
+
+
+def test_process_skips_and_flags_an_issue_already_ingested_from_a_different_pdf(tmp_path, monkeypatch):
+    # The real archive has overlapping scans (e.g. a standalone Jan issue
+    # alongside a Feb-Dec bound volume, or a bound volume split across
+    # Part-1/Part-2 files). If a different source PDF already wrote this
+    # issue_month, don't double-write it -- skip and log for manual review.
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    review_log = tmp_path / "manual_review.csv"
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(review_log))
+    (staging / "2011-Feb To 2011-Dec.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"2011-Feb To 2011-Dec.pdf": "drive-bound-volume"}')
+
+    fake_conn = _FakeConnection(existing_keys={("drive-standalone-jan", "2011-02")})
+    boundary = IssueBoundary(start_page=0, year=2011, month=2)
+    articles = [Article(title="Editorial", author="Someone", body="Body text here.")]
+
+    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    with patches[0], patches[1], patches[2] as fake_split, patches[3], patches[4], patches[5], patches[6]:
+        cmd_process(_Args())
+        fake_split.assert_not_called()
+
+    assert not any("insert into articles" in e[0] for e in fake_conn.executed)
+    assert review_log.exists()
+    assert "2011-Feb To 2011-Dec.pdf" in review_log.read_text()
+    assert "different source PDF" in review_log.read_text()
 
 
 def test_process_force_reprocesses_and_deletes_only_that_issue(tmp_path, monkeypatch):

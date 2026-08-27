@@ -65,3 +65,25 @@
     color: var(--brand-primary);
   }
 }
+
+/* A visible-but-unobtrusive horizontal scrollbar for the year strip on the
+   archive page -- the default OS scrollbar is either invisible (macOS,
+   until you touch the trackpad) or clunky (Windows), and this is the only
+   hint some browsers get that there's more to scroll through. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--brand-border) transparent;
+}
+
+.scroll-thin::-webkit-scrollbar {
+  height: 6px;
+}
+
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll-thin::-webkit-scrollbar-thumb {
+  background-color: var(--brand-border);
+  border-radius: 9999px;
+}

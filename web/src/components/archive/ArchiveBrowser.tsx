@@ -25,19 +25,22 @@ export function ArchiveBrowser({ issues }: { issues: BrowseIssue[] }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center gap-2">
-        <FilterPill
-          label="All years"
-          selected={selectedYear === "all"}
-          onClick={() => setSelectedYear("all")}
-        />
-        {years.map((year) => (
+      <div className="scroll-thin flex flex-nowrap items-center gap-2 overflow-x-auto scroll-px-1 snap-x pb-2">
+        <div className="snap-start shrink-0">
           <FilterPill
-            key={year}
-            label={String(year)}
-            selected={selectedYear === year}
-            onClick={() => setSelectedYear(year)}
+            label="All years"
+            selected={selectedYear === "all"}
+            onClick={() => setSelectedYear("all")}
           />
+        </div>
+        {years.map((year) => (
+          <div key={year} className="snap-start shrink-0">
+            <FilterPill
+              label={String(year)}
+              selected={selectedYear === year}
+              onClick={() => setSelectedYear(year)}
+            />
+          </div>
         ))}
       </div>
 

@@ -27,6 +27,27 @@ def already_ingested(conn: psycopg.Connection, drive_file_id: str, issue_month: 
         return cur.fetchone() is not None
 
 
+def issue_month_source(conn: psycopg.Connection, issue_month: str) -> Optional[str]:
+    """The drive_file_id already holding this issue_month, if any -- from
+    ANY source PDF, not just the one currently being processed.
+
+    The real Drive archive has overlapping scans (e.g. a standalone
+    "2011-Jan.PDF" alongside a "2011-Feb To 2011-Dec.PDF" bound volume, or a
+    bound volume split into "Part-1"/"Part-2" files that can misdetect a
+    shared boundary page): already_ingested() alone only catches the same
+    file being reprocessed, not a different file claiming an issue_month
+    that's already here from elsewhere. Used to skip -- and flag for manual
+    review -- rather than silently writing the same issue twice from two
+    different sources."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "select drive_file_id from articles where issue_month = %s limit 1",
+            (issue_month,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
 def ingested_issue_months(conn: psycopg.Connection) -> Set[str]:
     """Phase 6: what check_for_new_issues() diffs the web archive against."""
     with conn.cursor() as cur:

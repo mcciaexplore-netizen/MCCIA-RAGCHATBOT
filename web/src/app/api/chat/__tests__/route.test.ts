@@ -28,7 +28,8 @@ describe("POST /api/chat", () => {
   it("classifies then generates, and returns the issue scope in the response", async () => {
     vi.mocked(classifyQuery).mockResolvedValue({ scope: "issue", issueMonth: "2021-06" });
     vi.mocked(generateAnswer).mockResolvedValue({
-      answer: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
+      answerEnglish: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
+      answerMarathi: 'MCCIA ने रोबोटिक्सवर काम केले (Sampada, June 2021, "Editorial").',
       citations: [{ articleId: 1, articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "" }],
     });
 
@@ -47,7 +48,7 @@ describe("POST /api/chat", () => {
 
   it("returns issueMonth: null for open-scope answers", async () => {
     vi.mocked(classifyQuery).mockResolvedValue({ scope: "open" });
-    vi.mocked(generateAnswer).mockResolvedValue({ answer: "answer", citations: [] });
+    vi.mocked(generateAnswer).mockResolvedValue({ answerEnglish: "answer", answerMarathi: "उत्तर", citations: [] });
 
     const response = await POST(jsonRequest({ question: "What did MCCIA do during COVID?" }));
     const body = await response.json();

@@ -22,6 +22,7 @@ from google.genai import types
 
 from db.config import gemini_api_key
 from ingest.config import EMBEDDING_DIMENSIONS, GEMINI_EMBED_MODEL
+from ingest.usage_tracker import CHARS_PER_TOKEN_ESTIMATE, log_usage
 
 # Keeps individual requests well within payload/token limits regardless of
 # how long the chunks in a batch happen to be.
@@ -48,6 +49,10 @@ def _embed_batch(texts: List[str], task_type: str, client: genai.Client) -> List
             output_dimensionality=EMBEDDING_DIMENSIONS,
         ),
     )
+    metadata = getattr(result, "metadata", None)
+    if metadata is not None and getattr(metadata, "billable_character_count", None):
+        estimated_tokens = metadata.billable_character_count // CHARS_PER_TOKEN_ESTIMATE
+        log_usage(GEMINI_EMBED_MODEL, "embed", estimated_tokens, 0, estimated=True)
     return [_normalize(e.values) for e in result.embeddings]
 
 

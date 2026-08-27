@@ -22,10 +22,11 @@ export async function POST(request: Request) {
 
   try {
     const route = await classifyQuery(question);
-    const { answer, citations } = await generateAnswer(question, route);
+    const { answerEnglish, answerMarathi, citations } = await generateAnswer(question, route);
 
     const body: ChatApiResponse = {
-      answer,
+      answerEnglish,
+      answerMarathi,
       citations,
       scope: route.scope,
       issueMonth: route.scope === "issue" ? route.issueMonth : null,

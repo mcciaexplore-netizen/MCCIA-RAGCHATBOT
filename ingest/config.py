@@ -60,5 +60,9 @@ def manual_review_log() -> Path:
     return Path(_env("MANUAL_REVIEW_LOG", "./staging/manual_review.csv"))
 
 
+def usage_log() -> Path:
+    return Path(_env("USAGE_LOG", "./staging/usage_log.jsonl"))
+
+
 def web_archive_base_url() -> str:
     return _env("WEB_ARCHIVE_BASE_URL", "https://www.mcciapunesampada.com")

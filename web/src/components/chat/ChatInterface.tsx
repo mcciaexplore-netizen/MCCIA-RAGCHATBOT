@@ -7,8 +7,16 @@ import { CitationTag } from "./CitationTag";
 
 type ChatMessage =
   | { id: number; role: "user"; content: string }
-  | { id: number; role: "assistant"; content: string; citations: ParsedCitation[] }
+  | {
+      id: number;
+      role: "assistant";
+      contentEn: string;
+      contentMr: string;
+      citations: ParsedCitation[];
+    }
   | { id: number; role: "error"; content: string };
+
+type AssistantMessage = Extract<ChatMessage, { role: "assistant" }>;
 
 // Plain `Omit<ChatMessage, "id">` collapses to only the keys shared across
 // every union member (losing `citations`), because `Omit`/`Pick` don't
@@ -16,25 +24,30 @@ type ChatMessage =
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 type NewChatMessage = DistributiveOmit<ChatMessage, "id">;
 
+// Deliberately topic-based rather than recency-based ("latest issue", "June
+// 2021", "upcoming events") -- those only work once an issue from that
+// period is actually ingested, and right now the archive only covers a
+// scattered set of issues from 1945-2011. These stay answerable regardless
+// of which years happen to be ingested at any given time.
 const TRY_ASKING = [
   {
-    label: "Summarize the June 2021 issue",
-    question: "Summarize the June 2021 issue of Sampada.",
-    icon: DocumentIcon,
-  },
-  {
-    label: "What initiatives has MCCIA undertaken for MSMEs?",
-    question: "What initiatives has MCCIA undertaken for MSMEs?",
+    label: "How has MCCIA supported its members over the years?",
+    question: "How has MCCIA supported its members over the years?",
     icon: HandshakeIcon,
   },
   {
-    label: "Tell me about MCCIA's upcoming events",
-    question: "Tell me about MCCIA's upcoming events.",
-    icon: CalendarIcon,
+    label: "What tariff protections has MCCIA secured for local industries?",
+    question: "What tariff protections has MCCIA secured for local industries?",
+    icon: ShieldIcon,
   },
   {
-    label: "What were the major highlights in the latest issue?",
-    question: "What were the major highlights in the latest issue?",
+    label: "What insurance industry reforms did MCCIA propose?",
+    question: "What insurance industry reforms did MCCIA propose?",
+    icon: DocumentIcon,
+  },
+  {
+    label: "What trade advocacy has MCCIA carried out with the government?",
+    question: "What trade advocacy has MCCIA carried out with the government?",
     icon: ChartIcon,
   },
 ];
@@ -177,6 +190,37 @@ function MonitorIcon() {
   );
 }
 
+function AssistantBubble({ message }: { message: AssistantMessage }) {
+  const [lang, setLang] = useState<"en" | "mr">("en");
+
+  function tabClass(active: boolean) {
+    return active
+      ? "rounded-full bg-brand-primary px-3 py-1 text-sm font-medium text-white"
+      : "rounded-full px-3 py-1 text-sm font-medium text-brand-text-muted hover:bg-brand-primary/10";
+  }
+
+  return (
+    <>
+      <div className="mb-2 flex gap-1">
+        <button type="button" onClick={() => setLang("en")} className={tabClass(lang === "en")}>
+          English
+        </button>
+        <button type="button" onClick={() => setLang("mr")} className={tabClass(lang === "mr")}>
+          मराठी
+        </button>
+      </div>
+      <p className="whitespace-pre-wrap">{lang === "en" ? message.contentEn : message.contentMr}</p>
+      {message.citations.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {message.citations.map((citation) => (
+            <CitationTag key={`${citation.issueMonth}-${citation.articleTitle}`} citation={citation} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function ChatInterface() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -209,7 +253,12 @@ export function ChatInterface() {
       }
 
       const data: ChatApiResponse = await response.json();
-      addMessage({ role: "assistant", content: data.answer, citations: data.citations });
+      addMessage({
+        role: "assistant",
+        contentEn: data.answerEnglish,
+        contentMr: data.answerMarathi,
+        citations: data.citations,
+      });
     } catch {
       addMessage({
         role: "error",
@@ -346,16 +395,10 @@ export function ChatInterface() {
                       : "mr-auto max-w-[85%] rounded-2xl rounded-bl-sm border border-brand-border bg-brand-surface px-6 py-5 text-xl text-brand-text"
                 }
               >
-                <p className="whitespace-pre-wrap">{message.content}</p>
-                {message.role === "assistant" && message.citations.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {message.citations.map((citation) => (
-                      <CitationTag
-                        key={`${citation.issueMonth}-${citation.articleTitle}`}
-                        citation={citation}
-                      />
-                    ))}
-                  </div>
+                {message.role === "assistant" ? (
+                  <AssistantBubble message={message} />
+                ) : (
+                  <p className="whitespace-pre-wrap">{message.content}</p>
                 )}
               </li>
             ))}

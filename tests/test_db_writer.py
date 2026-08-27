@@ -3,6 +3,7 @@ from ingest.db_writer import (
     ingested_issue_months,
     insert_article,
     insert_chunks,
+    issue_month_source,
     write_article,
 )
 from ingest.split_articles import Article
@@ -20,7 +21,10 @@ class _FakeCursor:
 
     def execute(self, sql, params=None):
         self._conn.executed.append((sql.strip(), params))
-        if "select 1 from articles" in sql:
+        if "select drive_file_id from articles where issue_month" in sql:
+            matches = [drive_id for drive_id, month in self._conn.existing_drive_ids if month == params[0]]
+            self._conn.next_fetchone = (matches[0],) if matches else None
+        elif "select 1 from articles" in sql:
             key = (params[0], params[1])
             self._conn.next_fetchone = (1,) if key in self._conn.existing_drive_ids else None
         elif "insert into articles" in sql:
@@ -67,6 +71,16 @@ def test_already_ingested_false_for_a_different_issue_bundled_in_the_same_pdf():
     # different issue_month bundled in that same file look already-done.
     conn = _FakeConnection(existing_drive_ids={("abc123", "2021-06")})
     assert already_ingested(conn, "abc123", "2021-07") is False
+
+
+def test_issue_month_source_returns_the_owning_drive_file_id():
+    conn = _FakeConnection(existing_drive_ids={("abc123", "2021-06")})
+    assert issue_month_source(conn, "2021-06") == "abc123"
+
+
+def test_issue_month_source_none_when_not_ingested_from_anywhere():
+    conn = _FakeConnection(existing_drive_ids={("abc123", "2021-06")})
+    assert issue_month_source(conn, "2021-07") is None
 
 
 class _DistinctMonthsCursor:

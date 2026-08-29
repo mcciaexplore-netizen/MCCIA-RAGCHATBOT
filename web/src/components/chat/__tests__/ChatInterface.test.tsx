@@ -112,7 +112,7 @@ describe("ChatInterface", () => {
     await user.click(screen.getByRole("button", { name: "Ask" }));
 
     expect(screen.getByRole("button", { name: "Ask" })).toBeDisabled();
-    expect(screen.getByText("Thinking…")).toBeInTheDocument();
+    expect(screen.getByText("Understanding your question…")).toBeInTheDocument();
 
     resolveFetch(
       jsonResponse({ answerEnglish: "done", answerMarathi: "पूर्ण", citations: [], scope: "open", issueMonth: null })

@@ -23,7 +23,7 @@ hashing a 500MB+ file on every resume check.
 import gzip
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from ingest.config import GEMINI_OCR_MODEL, processed_cache_dir
 from ingest.extract_text import extract_pages
@@ -101,15 +101,22 @@ def write_cache(drive_file_id: str, pdf_path: Path, pages: List[str]) -> None:
 
 
 def get_or_extract_pages(
-    pdf_path: Path, drive_file_id: str, client=None, max_workers=None
+    pdf_path: Path,
+    drive_file_id: str,
+    client=None,
+    max_workers=None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> List[str]:
     """OCRs a PDF's pages exactly once per (file, content) pair -- reuses a
     valid local cache when one exists, otherwise OCRs via extract_text and
-    saves the result before returning."""
+    saves the result before returning.
+
+    progress_cb is only ever invoked on a cache miss (see extract_pages) --
+    optional, so existing callers are unaffected."""
     cached = read_cache(drive_file_id, pdf_path)
     if cached is not None:
         return cached
 
-    pages = extract_pages(pdf_path, client=client, max_workers=max_workers)
+    pages = extract_pages(pdf_path, client=client, max_workers=max_workers, progress_cb=progress_cb)
     write_cache(drive_file_id, pdf_path, pages)
     return pages

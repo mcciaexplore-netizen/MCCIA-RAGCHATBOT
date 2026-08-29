@@ -11,9 +11,10 @@ import io
 import json
 import ssl
 from pathlib import Path
-from typing import Iterator, NamedTuple, Optional
+from typing import Callable, Iterator, NamedTuple, Optional, Tuple
 
 import httplib2
+import pymupdf
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -93,7 +94,15 @@ def walk_pdfs(service, root_folder_id: str) -> Iterator[DriveFile]:
                 )
 
 
-def download_file(service, file_id: str, dest: Path) -> None:
+def download_file(
+    service,
+    file_id: str,
+    dest: Path,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    """progress_cb, if given, is called after each chunk as
+    (bytes_downloaded_so_far, total_bytes) -- optional so existing callers
+    (sync_all) are unaffected; see archive_downloader.py for a consumer."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     request = service.files().get_media(fileId=file_id)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -102,11 +111,13 @@ def download_file(service, file_id: str, dest: Path) -> None:
             downloader = MediaIoBaseDownload(fh, request)
             done = False
             while not done:
-                _, done = call_with_retry(
+                status, done = call_with_retry(
                     f"Drive download {dest.name}",
                     downloader.next_chunk,
                     is_transient=_is_transient_drive_error,
                 )
+                if progress_cb is not None and status is not None:
+                    progress_cb(status.resumable_progress, status.total_size)
     except Exception:
         # Don't leave a partial (possibly hundreds-of-MB) file behind on
         # disk after a failed download -- the next sync_all() run starts
@@ -115,6 +126,21 @@ def download_file(service, file_id: str, dest: Path) -> None:
         tmp.unlink(missing_ok=True)
         raise
     tmp.rename(dest)
+
+
+def validate_pdf(path: Path) -> Tuple[bool, Optional[int], Optional[str]]:
+    """Opens a downloaded file with pymupdf to confirm it's actually a
+    readable PDF (a byte-count match alone doesn't catch a truncated-but-
+    coincidentally-sized or corrupted file). Returns (is_valid, page_count,
+    error) -- error is None on success, page_count is None on failure."""
+    try:
+        doc = pymupdf.open(path)
+    except Exception as exc:
+        return False, None, repr(exc)
+    try:
+        return True, len(doc), None
+    finally:
+        doc.close()
 
 
 DRIVE_IDS_FILENAME = ".drive_ids.json"
@@ -138,7 +164,9 @@ def load_drive_ids(dest_dir: Optional[Path] = None) -> dict:
     return json.loads(path.read_text())
 
 
-def _save_drive_ids(dest_dir: Path, ids: dict) -> None:
+def save_drive_ids(dest_dir: Path, ids: dict) -> None:
+    """Public so other Drive-walking callers (see archive_downloader.py) can
+    keep this sidecar current without duplicating its format."""
     _drive_ids_path(dest_dir).write_text(json.dumps(ids, indent=2, sort_keys=True))
 
 
@@ -163,7 +191,7 @@ def sync_all(dest_dir: Optional[Path] = None, service=None) -> list:
         drive_ids[f.name] = f.file_id
         dest = dest_dir / f.name
         if dest.exists() and dest.stat().st_size == f.size:
-            _save_drive_ids(dest_dir, drive_ids)
+            save_drive_ids(dest_dir, drive_ids)
             continue
         # One file that exhausts its retries (or hits a permanent error)
         # shouldn't take the whole archive-wide sync down with it -- log it
@@ -176,7 +204,7 @@ def sync_all(dest_dir: Optional[Path] = None, service=None) -> list:
             print(f"[SKIP] {f.name}: download failed, logged for manual review: {exc!r}")
             continue
         downloaded.append(dest)
-        _save_drive_ids(dest_dir, drive_ids)
+        save_drive_ids(dest_dir, drive_ids)
     return downloaded
 
 

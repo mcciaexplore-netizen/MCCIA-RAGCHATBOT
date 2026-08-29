@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { classifyQuery, parseClassification } from "../query-router";
+import { classifyQuery, parseClassification, tryDeterministicClassify } from "../query-router";
 
 describe("parseClassification", () => {
   it("returns issue scope with a well-formed issue_month", () => {
@@ -141,6 +141,88 @@ describe("parseClassification", () => {
   });
 });
 
+describe("tryDeterministicClassify", () => {
+  it("parses 'Sampada July 1956' as an exact issue", () => {
+    expect(tryDeterministicClassify("Sampada July 1956")).toEqual({
+      scope: "issue",
+      issueMonth: "1956-07",
+      intent: "semantic",
+    });
+  });
+
+  it("parses a bare 'July 1956' the same way, with no publication name needed", () => {
+    expect(tryDeterministicClassify("July 1956")).toEqual({
+      scope: "issue",
+      issueMonth: "1956-07",
+      intent: "semantic",
+    });
+  });
+
+  it("detects a summary cue alongside a month+year", () => {
+    expect(tryDeterministicClassify("July 1956 summary")).toEqual({
+      scope: "issue",
+      issueMonth: "1956-07",
+      intent: "summary",
+    });
+  });
+
+  it("parses an explicit 'between X and Y' range", () => {
+    expect(tryDeterministicClassify("Find Tata between 1955 and 1965")).toEqual({
+      scope: "range",
+      yearFrom: 1955,
+      yearTo: 1965,
+      intent: "semantic",
+    });
+  });
+
+  it("parses a dash-separated range", () => {
+    expect(tryDeterministicClassify("Kirloskar 1960-1970")).toEqual({
+      scope: "range",
+      yearFrom: 1960,
+      yearTo: 1970,
+      intent: "semantic",
+    });
+  });
+
+  it("parses a single bare year as a range with equal bounds", () => {
+    expect(tryDeterministicClassify("Tata 1960")).toEqual({
+      scope: "range",
+      yearFrom: 1960,
+      yearTo: 1960,
+      intent: "semantic",
+    });
+  });
+
+  it("always defers to Gemini when an exact/verbatim cue is present, even with a clear date", () => {
+    // Exact intent benefits most from Gemini's alias/transliteration
+    // generation (see query-router.ts's comment) -- shortcutting this would
+    // silently regress cross-script search quality.
+    expect(tryDeterministicClassify("exact mentions of Kirloskar in 1960")).toBeNull();
+    expect(tryDeterministicClassify("exact mentions of Kirloskar")).toBeNull();
+  });
+
+  it("defers to Gemini for two or more unconnected bare years (genuinely ambiguous)", () => {
+    expect(tryDeterministicClassify("Compare 1960 and 1970 policies")).toBeNull();
+  });
+
+  it("defers to Gemini for a year outside the archive's real span", () => {
+    expect(tryDeterministicClassify("What happened in 2021?")).toBeNull();
+    expect(tryDeterministicClassify("What happened in 1800?")).toBeNull();
+  });
+
+  it("defers to Gemini for a question with no date structure at all", () => {
+    expect(tryDeterministicClassify("What did MCCIA do during COVID?")).toBeNull();
+  });
+
+  it("is case-insensitive on month names and cue words", () => {
+    expect(tryDeterministicClassify("sampada JULY 1956 SUMMARY")).toEqual({
+      scope: "issue",
+      issueMonth: "1956-07",
+      intent: "summary",
+    });
+  });
+});
+
 function fakeClient(outputText: string) {
   const create = vi.fn().mockResolvedValue({ output_text: outputText });
   return {
@@ -181,5 +263,23 @@ describe("classifyQuery", () => {
     process.env.GEMINI_API_KEY = "test-key";
 
     await expect(classifyQuery("anything", { client })).rejects.toThrow(/no output text/);
+  });
+
+  it("skips the Gemini call entirely for a deterministically-parseable question", async () => {
+    const { client, create } = fakeClient("should never be read");
+
+    const route = await classifyQuery("Sampada July 1956", { client });
+
+    expect(route).toEqual({ scope: "issue", issueMonth: "1956-07", intent: "semantic" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("still calls Gemini for a question the deterministic parser can't confidently handle", async () => {
+    const { client, create } = fakeClient(JSON.stringify({ scope: "open", intent: "semantic" }));
+    process.env.GEMINI_API_KEY = "test-key";
+
+    await classifyQuery("What did MCCIA do during COVID?", { client });
+
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });

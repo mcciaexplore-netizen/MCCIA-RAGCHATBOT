@@ -41,3 +41,17 @@ export type BrowseIssue = {
 export type BrowseIndex = {
   issues: BrowseIssue[];
 };
+
+// Shared with conversation-history.ts (localStorage persistence) as well as
+// ChatInterface's own render logic -- kept here rather than local to the
+// component so history storage doesn't need to import a client component.
+export type ChatMessage =
+  | { id: number; role: "user"; content: string }
+  | {
+      id: number;
+      role: "assistant";
+      contentEn: string;
+      contentMr: string;
+      citations: ParsedCitation[];
+    }
+  | { id: number; role: "error"; content: string };

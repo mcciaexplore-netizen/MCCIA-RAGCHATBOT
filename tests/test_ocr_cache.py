@@ -143,7 +143,7 @@ def test_get_or_extract_pages_extracts_and_caches_on_miss(tmp_path, monkeypatch)
     pdf_path = _make_pdf(tmp_path)
     calls = []
 
-    def _fake_extract(path, client=None, max_workers=None):
+    def _fake_extract(path, client=None, max_workers=None, progress_cb=None):
         calls.append(path)
         return ["freshly ocrd page"]
 

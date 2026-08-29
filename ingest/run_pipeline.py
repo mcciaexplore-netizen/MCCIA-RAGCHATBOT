@@ -16,7 +16,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Callable, Optional
 
+import psycopg
 from dotenv import load_dotenv
 
 from db.connection import connect
@@ -63,7 +65,25 @@ def _mark_fully_processed(staging_dir: Path, drive_file_id: str) -> None:
     _fully_processed_path(staging_dir).write_text(json.dumps(sorted(drive_file_ids), indent=2))
 
 
-def process_pdf(pdf_path: Path, drive_file_id: str, staging_dir: Path, force: bool = False) -> int:
+def _commit_status(fn: Callable[[psycopg.Connection], None]) -> None:
+    """Runs fn(conn) on a fresh connection and commits immediately, then
+    closes it -- see process_pdf's file-level status writes for why no
+    status connection is ever held open across a Gemini call."""
+    conn = connect()
+    try:
+        fn(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def process_pdf(
+    pdf_path: Path,
+    drive_file_id: str,
+    staging_dir: Path,
+    force: bool = False,
+    on_event: Optional[Callable[[str, dict], None]] = None,
+) -> int:
     """Returns the number of issues newly written from this PDF.
 
     A single PDF can bundle several issues (see extract_text.py and
@@ -80,55 +100,76 @@ def process_pdf(pdf_path: Path, drive_file_id: str, staging_dir: Path, force: bo
     database), that drive_file_id is recorded in FULLY_PROCESSED_FILENAME so
     a later rerun can skip OCR for it entirely -- a file with anything sent
     to manual review is deliberately left off that list, so it's retried.
+
+    on_event, if given, is called as (event_name, payload) at each stage
+    transition -- optional so existing callers are unaffected; see
+    archive_processor.py's live dashboard for a consumer. Event names:
+    "file_stage" (payload: stage), "ocr_progress" (pages_done, total_pages).
     """
     if not force and drive_file_id in _load_fully_processed(staging_dir):
         print(f"[SKIP] {pdf_path.name}: already fully processed (use --force to reprocess)")
         return 0
 
-    # File-level status (ingestion_files): one commit for the whole
-    # discover->OCR->issue-detection sequence on the happy path, or one
-    # commit recording exactly which stage failed -- so a resumed run can
-    # tell "never touched" from "OCR done, crashed after" from "OCR failed
-    # outright" without needing to re-OCR to find out.
-    status_conn = connect()
+    # File-level status (ingestion_files): each write below uses its own
+    # short-lived connection, committed immediately -- never held open
+    # across get_or_extract_pages()/split_into_issues(), both of which can
+    # run for many minutes against a real bound volume (confirmed live: a
+    # 127-page file's OCR alone took ~8 minutes). A connection sitting idle
+    # in an open transaction that long gets killed by Neon's own
+    # idle_in_transaction_session_timeout (5 minutes, confirmed) -- which
+    # silently turned a fully-successful OCR into a recorded failure before
+    # this was split up. Splitting these into separate immediately-committed
+    # writes doesn't weaken resumability: each write is already independently
+    # meaningful ("ingestion_files row exists", "OCR completed", "boundaries
+    # detected"), so there's nothing to roll back as a group in the first
+    # place.
+    _commit_status(lambda conn: upsert_ingestion_file(
+        conn, drive_file_id=drive_file_id, filename=pdf_path.name, file_size=pdf_path.stat().st_size
+    ))
+
+    if on_event:
+        on_event("file_stage", {"stage": "ocr"})
+
+    def _ocr_progress(pages_done: int, total_pages: int) -> None:
+        if on_event:
+            on_event("ocr_progress", {"pages_done": pages_done, "total_pages": total_pages})
+
     try:
-        upsert_ingestion_file(
-            status_conn,
-            drive_file_id=drive_file_id,
-            filename=pdf_path.name,
-            file_size=pdf_path.stat().st_size,
+        pages = get_or_extract_pages(
+            pdf_path, drive_file_id, progress_cb=_ocr_progress if on_event else None
         )
+    except Exception as exc:
+        _commit_status(lambda conn: record_file_failure(conn, drive_file_id, "ocr", str(exc)))
+        raise
 
-        try:
-            pages = get_or_extract_pages(pdf_path, drive_file_id)
-        except Exception as exc:
-            record_file_failure(status_conn, drive_file_id, "ocr", str(exc))
-            status_conn.commit()
-            raise
+    # Real Sampada scans never have a trustworthy text layer (see
+    # extract_text.py) -- OCR is unconditionally required today; this
+    # column exists so a future native-text-layer check has somewhere
+    # to record a different answer without a schema change.
+    def _mark_ocr_done(conn):
+        set_ocr_required(conn, drive_file_id, True)
+        mark_file_stage(conn, drive_file_id, "ocr_completed_at")
 
-        # Real Sampada scans never have a trustworthy text layer (see
-        # extract_text.py) -- OCR is unconditionally required today; this
-        # column exists so a future native-text-layer check has somewhere
-        # to record a different answer without a schema change.
-        set_ocr_required(status_conn, drive_file_id, True)
-        mark_file_stage(status_conn, drive_file_id, "ocr_completed_at")
+    _commit_status(_mark_ocr_done)
 
-        try:
-            issues = split_into_issues(pages)
-        except IssueBoundaryError as exc:
-            log_manual_review(pdf_path.name, f"Gemini could not find issue boundaries: {exc}")
-            print(f"[SKIP] {pdf_path.name}: issue-boundary detection failed, logged for manual review")
-            record_file_failure(status_conn, drive_file_id, "issue_detection", str(exc))
-            status_conn.commit()
-            return 0
+    if on_event:
+        on_event("file_stage", {"stage": "issue_detection"})
 
-        mark_file_stage(status_conn, drive_file_id, "issue_detection_completed_at")
-        status_conn.commit()
-    finally:
-        status_conn.close()
+    try:
+        issues = split_into_issues(pages)
+    except IssueBoundaryError as exc:
+        log_manual_review(pdf_path.name, f"Gemini could not find issue boundaries: {exc}")
+        print(f"[SKIP] {pdf_path.name}: issue-boundary detection failed, logged for manual review")
+        _commit_status(lambda conn: record_file_failure(conn, drive_file_id, "issue_detection", str(exc)))
+        return 0
+
+    _commit_status(lambda conn: mark_file_stage(conn, drive_file_id, "issue_detection_completed_at"))
+
+    if on_event:
+        on_event("file_stage", {"stage": "processing_editions", "edition_count": len(issues)})
 
     outcomes = [
-        _process_one_issue(pdf_path, drive_file_id, boundary, issue_pages, force=force)
+        _process_one_issue(pdf_path, drive_file_id, boundary, issue_pages, force=force, on_event=on_event)
         for boundary, issue_pages in issues
     ]
     processed = sum(1 for written, _resolved in outcomes if written)
@@ -141,7 +182,12 @@ def process_pdf(pdf_path: Path, drive_file_id: str, staging_dir: Path, force: bo
 
 
 def _process_one_issue(
-    pdf_path: Path, drive_file_id: str, boundary: IssueBoundary, issue_pages: list, force: bool
+    pdf_path: Path,
+    drive_file_id: str,
+    boundary: IssueBoundary,
+    issue_pages: list,
+    force: bool,
+    on_event: Optional[Callable[[str, dict], None]] = None,
 ) -> tuple:
     """Returns (written, resolved). `written` is True if this issue was
     newly written this run. `resolved` is True if this issue_month is now
@@ -151,10 +197,15 @@ def _process_one_issue(
     issue_month = f"{boundary.year:04d}-{boundary.month:02d}"
     log_prefix = f"{pdf_path.name} {issue_month}"
 
+    def _emit(stage: str, **extra) -> None:
+        if on_event:
+            on_event("issue_stage", {"year": boundary.year, "month": boundary.month, "stage": stage, **extra})
+
     conn = connect()
     try:
         if not force and already_ingested(conn, drive_file_id, issue_month):
             print(f"[SKIP] {log_prefix}: already in the database (use --force to reprocess)")
+            _emit("skipped_already_indexed")
             return False, True
 
         existing_source = issue_month_source(conn, issue_month)
@@ -166,9 +217,12 @@ def _process_one_issue(
                 f"skipped rather than double-writing this issue",
             )
             print(f"[SKIP] {log_prefix}: already ingested from a different source PDF, logged for manual review")
+            _emit("skipped_duplicate_source")
             return False, False
     finally:
         conn.close()
+
+    _emit("article_splitting")
 
     # Preserves page identity through the join that would otherwise erase it
     # (see ingest/page_mapping.py) -- no extra Gemini call, built purely
@@ -185,12 +239,16 @@ def _process_one_issue(
     except ArticleSplitError as exc:
         log_manual_review(pdf_path.name, f"{issue_month}: Gemini returned malformed article boundaries twice: {exc}")
         print(f"[SKIP] {log_prefix}: article splitting failed, logged for manual review")
+        _emit("failed", reason="article_splitting")
         return False, False
 
     if not articles:
         log_manual_review(pdf_path.name, f"{issue_month}: Gemini returned zero article boundaries")
         print(f"[SKIP] {log_prefix}: no articles detected, logged for manual review")
+        _emit("failed", reason="no_articles_detected")
         return False, False
+
+    _emit("chunking_and_embedding", article_count=len(articles))
 
     # Supplementary cross-check, 2021+ only -- see ingest/web_archive.py.
     source_url = lookup_source_url(issue_month) if boundary.year >= 2021 else None
@@ -239,11 +297,13 @@ def _process_one_issue(
     except Exception as exc:
         conn.rollback()
         _record_durable_issue_failure(boundary, "writing", str(exc))
+        _emit("failed", reason="writing")
         raise
     finally:
         conn.close()
 
     print(f"[OK] {log_prefix}: {len(articles)} articles")
+    _emit("indexed", article_count=len(articles))
     return True, True
 
 

@@ -78,5 +78,9 @@ def usage_log() -> Path:
     return Path(_env("USAGE_LOG", "./staging/usage_log.jsonl"))
 
 
+def download_log() -> Path:
+    return Path(_env("DOWNLOAD_LOG", "./staging/download_log.jsonl"))
+
+
 def web_archive_base_url() -> str:
     return _env("WEB_ARCHIVE_BASE_URL", "https://www.mcciapunesampada.com")

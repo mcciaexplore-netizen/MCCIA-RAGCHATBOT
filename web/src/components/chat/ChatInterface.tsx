@@ -1,22 +1,37 @@
 "use client";
 
 import Link from "next/link";
-import { useRef, useState } from "react";
-import type { ChatApiResponse, ParsedCitation } from "@/lib/types";
-import { CitationTag } from "./CitationTag";
-
-type ChatMessage =
-  | { id: number; role: "user"; content: string }
-  | {
-      id: number;
-      role: "assistant";
-      contentEn: string;
-      contentMr: string;
-      citations: ParsedCitation[];
-    }
-  | { id: number; role: "error"; content: string };
+import { useEffect, useRef, useState } from "react";
+import type { ChatApiResponse, ChatMessage } from "@/lib/types";
+import { CitationTag, type SourceTarget } from "./CitationTag";
 
 type AssistantMessage = Extract<ChatMessage, { role: "assistant" }>;
+
+// Honest, sequential stage labels matching the real pipeline order
+// (classify+embed run concurrently, then retrieval, then generation) --
+// never a fake percentage, and never implying a PDF is being scanned live
+// (ordinary search only ever reads already-indexed Neon data).
+const LOADING_STAGES = [
+  "Understanding your question…",
+  "Searching the MCCI archive…",
+  "Preparing a grounded answer…",
+];
+
+// Only ever rendered while a request is in flight (see its call site) --
+// mounting fresh for every loading session is what gives stageIndex a clean
+// start at 0 each time, with no manual reset needed.
+function LoadingIndicator() {
+  const [stageIndex, setStageIndex] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setStageIndex((i) => Math.min(i + 1, LOADING_STAGES.length - 1));
+    }, 1600);
+    return () => clearInterval(interval);
+  }, []);
+
+  return LOADING_STAGES[stageIndex];
+}
 
 // Plain `Omit<ChatMessage, "id">` collapses to only the keys shared across
 // every union member (losing `citations`), because `Omit`/`Pick` don't
@@ -190,7 +205,13 @@ function MonitorIcon() {
   );
 }
 
-function AssistantBubble({ message }: { message: AssistantMessage }) {
+function AssistantBubble({
+  message,
+  onOpenSource,
+}: {
+  message: AssistantMessage;
+  onOpenSource?: (target: SourceTarget) => void;
+}) {
   const [lang, setLang] = useState<"en" | "mr">("en");
 
   function tabClass(active: boolean) {
@@ -213,7 +234,11 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
       {message.citations.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
           {message.citations.map((citation) => (
-            <CitationTag key={`${citation.issueMonth}-${citation.articleTitle}`} citation={citation} />
+            <CitationTag
+              key={`${citation.issueMonth}-${citation.articleTitle}`}
+              citation={citation}
+              onOpenSource={onOpenSource}
+            />
           ))}
         </div>
       )}
@@ -221,11 +246,32 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
   );
 }
 
-export function ChatInterface() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export function ChatInterface({
+  initialMessages,
+  onConversationUpdate,
+  onOpenSource,
+}: {
+  /** Lets a parent reopen a saved conversation -- omit for a fresh one. */
+  initialMessages?: ChatMessage[];
+  /** Called after every change to this conversation's messages, so a parent
+   * can persist it (e.g. to localStorage -- see conversation-history.ts).
+   * Never called with an empty message list. */
+  onConversationUpdate?: (messages: ChatMessage[]) => void;
+  /** Wired to each citation's click -- see CitationTag and SourceViewer. */
+  onOpenSource?: (target: SourceTarget) => void;
+} = {}) {
+  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages ?? []);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const nextId = useRef(0);
+
+  useEffect(() => {
+    if (messages.length > 0) onConversationUpdate?.(messages);
+    // onConversationUpdate is expected to be referentially stable per
+    // conversation (the parent remounts this component via `key` for a new
+    // one) -- including it here would re-fire this on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages]);
 
   function addMessage(message: NewChatMessage) {
     const withId = { ...message, id: nextId.current++ } as ChatMessage;
@@ -396,7 +442,7 @@ export function ChatInterface() {
                 }
               >
                 {message.role === "assistant" ? (
-                  <AssistantBubble message={message} />
+                  <AssistantBubble message={message} onOpenSource={onOpenSource} />
                 ) : (
                   <p className="whitespace-pre-wrap">{message.content}</p>
                 )}
@@ -404,7 +450,7 @@ export function ChatInterface() {
             ))}
             {isLoading && (
               <li className="mr-auto max-w-[85%] rounded-2xl rounded-bl-sm border border-brand-border bg-brand-surface px-6 py-5 text-xl text-brand-text-muted">
-                Thinking…
+                <LoadingIndicator />
               </li>
             )}
           </ol>

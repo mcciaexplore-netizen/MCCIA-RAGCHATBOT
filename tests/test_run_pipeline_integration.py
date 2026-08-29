@@ -8,7 +8,7 @@ import json
 from unittest.mock import patch
 
 from ingest.detect_issue_boundaries import IssueBoundary, IssueBoundaryError
-from ingest.run_pipeline import cmd_all, cmd_check_web, cmd_process
+from ingest.run_pipeline import cmd_all, cmd_check_web, cmd_process, process_pdf
 from ingest.split_articles import Article, ArticleSplitError
 
 
@@ -131,7 +131,82 @@ def test_process_writes_articles_for_a_single_detected_issue(tmp_path, monkeypat
     assert params[2] == 1  # article_index
     assert params[3] == "Editorial"  # article_title
     assert params[7] == "drive-abc123"  # source_pdf_id
-    assert fake_conn.commits == 2  # 1 file-level (ingestion_files) + 1 issue-level
+    # 3 file-level commits (upsert_ingestion_file, ocr_completed_at,
+    # issue_detection_completed_at -- each its own short-lived connection,
+    # see process_pdf's _commit_status) + 1 issue-level.
+    assert fake_conn.commits == 4
+
+
+def test_process_pdf_emits_on_event_stage_sequence_for_a_successful_run(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    pdf_path = staging / "Sampada_June_2021.pdf"
+    pdf_path.write_bytes(b"")
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    articles = [Article(title="Editorial", author="", body="Welcome to this special issue.")]
+    patches = _patched(fake_conn, issues=[(boundary, ["Welcome to this special issue.", "body"], articles)])
+
+    events = []
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        process_pdf(pdf_path, "drive-abc123", staging, on_event=lambda name, payload: events.append((name, payload)))
+
+    event_names = [name for name, _ in events]
+    assert event_names == [
+        "file_stage",  # ocr
+        "file_stage",  # issue_detection
+        "file_stage",  # processing_editions
+        "issue_stage",  # article_splitting
+        "issue_stage",  # chunking_and_embedding
+        "issue_stage",  # indexed
+    ]
+    assert events[0][1] == {"stage": "ocr"}
+    assert events[1][1] == {"stage": "issue_detection"}
+    assert events[-1][1] == {"year": 2021, "month": 6, "stage": "indexed", "article_count": 1}
+
+
+def test_process_pdf_emits_skipped_event_for_an_already_ingested_issue(tmp_path, monkeypatch):
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    pdf_path = staging / "Sampada_June_2021.pdf"
+    pdf_path.write_bytes(b"")
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    patches = _patched(fake_conn, issues=[(boundary, ["page"], [])])
+
+    events = []
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[
+        6
+    ], patch("ingest.run_pipeline.already_ingested", return_value=True):
+        process_pdf(pdf_path, "drive-abc123", staging, on_event=lambda name, payload: events.append((name, payload)))
+
+    assert events[-1] == ("issue_stage", {"year": 2021, "month": 6, "stage": "skipped_already_indexed"})
+
+
+def test_process_never_calls_on_event_when_omitted(tmp_path, monkeypatch):
+    # No on_event given -- must behave exactly as before (this is the
+    # cmd_process/CLI path's default).
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    (staging / "Sampada_June_2021.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"Sampada_June_2021.pdf": "drive-abc123"}')
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    articles = [Article(title="Editorial", author="", body="Welcome to this special issue.")]
+    patches = _patched(fake_conn, issues=[(boundary, ["Welcome to this special issue.", "body"], articles)])
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        cmd_process(_Args())  # must not raise just from on_event being absent
+
+    insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
+    assert len(insert_calls) == 1
 
 
 def test_process_assigns_one_based_article_indexes_within_an_issue(tmp_path, monkeypatch):
@@ -196,10 +271,11 @@ def test_process_writes_every_issue_bundled_in_one_pdf(tmp_path, monkeypatch):
     assert len(insert_calls) == 2
     issue_coordinates = {params[0:2] for _, params in insert_calls}
     assert issue_coordinates == {(1945, 7), (1946, 1)}
-    # 1 file-level commit (ingestion_files: OCR + issue-detection status)
-    # + 1 commit per issue -- issue writes still aren't one shared commit
-    # for the whole PDF, which is the property this test guards.
-    assert fake_conn.commits == 3
+    # 3 file-level commits (upsert_ingestion_file, ocr_completed_at,
+    # issue_detection_completed_at) + 1 commit per issue -- issue writes
+    # still aren't one shared commit for the whole PDF, which is the
+    # property this test guards.
+    assert fake_conn.commits == 5
 
 
 def test_process_records_failure_stage_and_rolls_back_when_writing_articles_fails(tmp_path, monkeypatch):
@@ -474,7 +550,7 @@ def test_process_can_retry_only_selected_failed_files(tmp_path, monkeypatch):
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6] as extract:
         cmd_process(_SelectedArgs())
 
-    extract.assert_called_once_with(staging / "1946 April.PDF", "drive-1946")
+    extract.assert_called_once_with(staging / "1946 April.PDF", "drive-1946", progress_cb=None)
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 1
     assert insert_calls[0][1][0:3] == (1946, 4, 1)

@@ -153,6 +153,34 @@ def test_extract_pages_batches_across_multiple_calls(tmp_path):
     assert len(client.calls) == 2
 
 
+def test_extract_pages_reports_progress_after_each_batch(tmp_path):
+    pdf_path = tmp_path / "issue.pdf"
+    _make_pdf(pdf_path, num_pages=8)  # > OCR_PAGE_BATCH_SIZE (6) -- 2 batches
+    client = _FakeGemini(
+        pages_by_call=[
+            [{"page_number": i, "text": f"page {i}"} for i in range(1, 7)],
+            [{"page_number": i, "text": f"page {i + 6}"} for i in range(1, 3)],
+        ]
+    )
+    progress_calls = []
+
+    extract_pages(pdf_path, client=client, progress_cb=lambda done, total: progress_calls.append((done, total)))
+
+    assert progress_calls == [(6, 8), (8, 8)]
+
+
+def test_extract_pages_never_calls_progress_cb_when_omitted(tmp_path):
+    pdf_path = tmp_path / "issue.pdf"
+    _make_pdf(pdf_path, num_pages=2)
+    client = _FakeGemini(
+        pages_by_call=[[{"page_number": 1, "text": "a"}, {"page_number": 2, "text": "b"}]]
+    )
+
+    # No progress_cb given -- must not raise just from computing a page count.
+    pages = extract_pages(pdf_path, client=client)
+    assert pages == ["a", "b"]
+
+
 def test_extract_pages_retries_once_on_malformed_batch(tmp_path):
     pdf_path = tmp_path / "issue.pdf"
     _make_pdf(pdf_path, num_pages=1)

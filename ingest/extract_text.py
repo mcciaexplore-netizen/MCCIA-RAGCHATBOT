@@ -15,7 +15,7 @@ import json
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
 
 import pymupdf
 from google import genai
@@ -168,6 +168,7 @@ def extract_pages(
     pdf_path: Path,
     client: Optional[genai.Client] = None,
     max_workers: Optional[int] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> List[str]:
     """Returns OCR'd text for each page, in order.
 
@@ -178,15 +179,22 @@ def extract_pages(
     than materializing a whole 900-page bound volume up front. Results are
     reassembled in submission order regardless of which batch's call
     actually completes first.
+
+    progress_cb, if given, is called as (pages_done, total_pages) after each
+    batch completes -- optional so existing callers are unaffected; see
+    archive_processor.py for a consumer.
     """
     client = client or gemini_client()
     workers = OCR_CONCURRENCY if max_workers is None else max_workers
+    total_pages = pymupdf.open(pdf_path).page_count if progress_cb is not None else 0
 
     batch_iter = iter_page_image_batches(pdf_path)
     if workers <= 1:
         pages: List[str] = []
         for batch in batch_iter:
             pages.extend(_ocr_batch(batch, client))
+            if progress_cb is not None:
+                progress_cb(len(pages), total_pages)
         return pages
 
     pages = []
@@ -196,9 +204,13 @@ def extract_pages(
             window.append(pool.submit(_ocr_batch, batch, client))
         for next_batch in batch_iter:
             pages.extend(window.popleft().result())
+            if progress_cb is not None:
+                progress_cb(len(pages), total_pages)
             window.append(pool.submit(_ocr_batch, next_batch, client))
         while window:
             pages.extend(window.popleft().result())
+            if progress_cb is not None:
+                progress_cb(len(pages), total_pages)
     return pages
 
 

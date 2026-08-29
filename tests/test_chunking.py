@@ -1,4 +1,6 @@
-from ingest.chunking import chunk_text
+import pytest
+
+from ingest.chunking import chunk_text, chunk_text_with_pages
 
 
 def test_short_text_returns_a_single_chunk():
@@ -51,3 +53,50 @@ def test_last_chunk_is_not_dropped_when_shorter_than_target():
 
     chunks = chunk_text(text, target_tokens=300, overlap_tokens=50)
     assert "word249" in chunks[-1]
+
+
+def test_chunk_text_with_pages_matches_chunk_text_content():
+    words = [f"word{i}" for i in range(1000)]
+    text = " ".join(words)
+    word_pages = [1] * len(words)
+
+    plain = chunk_text(text, target_tokens=300, overlap_tokens=50)
+    with_pages = chunk_text_with_pages(text, word_pages, target_tokens=300, overlap_tokens=50)
+
+    assert [c for c, _ in with_pages] == plain
+
+
+def test_chunk_text_with_pages_attributes_single_page_article_correctly():
+    text = "one two three four five"
+    word_pages = [7, 7, 7, 7, 7]
+    [(chunk, page)] = chunk_text_with_pages(text, word_pages, target_tokens=300, overlap_tokens=50)
+    assert chunk == text
+    assert page == 7
+
+
+def test_chunk_text_with_pages_uses_the_starting_word_page_when_a_chunk_spans_pages():
+    # 250 words at ~225/chunk (300 tokens * 0.75) splits into 2 chunks -- the
+    # first ~213 words on page 1, the rest on page 2 (spanning the split).
+    words = [f"word{i}" for i in range(250)]
+    text = " ".join(words)
+    word_pages = [1] * 200 + [2] * 50
+
+    chunks = chunk_text_with_pages(text, word_pages, target_tokens=300, overlap_tokens=50)
+
+    assert len(chunks) == 2
+    first_chunk, first_page = chunks[0]
+    assert first_page == 1  # starts on page 1
+    assert "word0" in first_chunk
+    # the second chunk overlaps back into page-1 words but is attributed to
+    # whichever page its own FIRST word (the overlap start) falls on
+    second_chunk, second_page = chunks[1]
+    assert "word249" in second_chunk
+
+
+def test_chunk_text_with_pages_empty_text_returns_no_chunks():
+    assert chunk_text_with_pages("", []) == []
+
+
+def test_chunk_text_with_pages_rejects_mismatched_word_pages_length():
+    with pytest.raises(AssertionError):
+        chunk_text_with_pages("one two three", [1, 1], target_tokens=300, overlap_tokens=50)

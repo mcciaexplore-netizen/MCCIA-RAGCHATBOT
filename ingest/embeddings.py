@@ -20,18 +20,13 @@ from typing import List, Optional
 from google import genai
 from google.genai import types
 
-from db.config import gemini_api_key
 from ingest.config import EMBEDDING_DIMENSIONS, GEMINI_EMBED_MODEL
-from ingest.gemini_retry import call_with_retry
+from ingest.gemini_retry import call_with_retry, gemini_client
 from ingest.usage_tracker import CHARS_PER_TOKEN_ESTIMATE, log_usage
 
 # Keeps individual requests well within payload/token limits regardless of
 # how long the chunks in a batch happen to be.
 _BATCH_SIZE = 100
-
-
-def _client() -> genai.Client:
-    return genai.Client(api_key=gemini_api_key())
 
 
 def _normalize(vector: List[float]) -> List[float]:
@@ -74,7 +69,7 @@ def embed_texts(
     if not texts:
         return []
 
-    client = client or _client()
+    client = client or gemini_client()
     embeddings: List[List[float]] = []
     for i in range(0, len(texts), _BATCH_SIZE):
         batch = texts[i : i + _BATCH_SIZE]

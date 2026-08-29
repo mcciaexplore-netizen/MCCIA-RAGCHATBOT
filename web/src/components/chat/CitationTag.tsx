@@ -3,7 +3,10 @@ import { formatIssueMonth } from "@/lib/format";
 import type { ParsedCitation } from "@/lib/types";
 
 export function CitationTag({ citation }: { citation: ParsedCitation }) {
-  const label = `${formatIssueMonth(citation.issueMonth)} — ${citation.articleTitle}`;
+  // Page is appended only when known -- never fabricated for a citation
+  // whose underlying chunk predates page tracking (see web/src/lib/retrieval.ts).
+  const pageSuffix = citation.page != null ? `, Page ${citation.page}` : "";
+  const label = `${formatIssueMonth(citation.issueMonth)} — ${citation.articleTitle}${pageSuffix}`;
 
   // Every citation links to its full transcription -- most pre-2021 issues
   // have no external source_url, so that can't be the only way to read the

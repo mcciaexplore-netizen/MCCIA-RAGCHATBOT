@@ -25,13 +25,20 @@ from ingest.db_writer import (
     already_ingested,
     ingested_issue_months,
     issue_month_source,
+    mark_file_stage,
+    mark_issue_stage,
+    record_file_failure,
+    record_issue_failure,
+    set_ocr_required,
+    upsert_ingestion_file,
     upsert_sampada,
     write_article,
 )
 from ingest.detect_issue_boundaries import IssueBoundary, IssueBoundaryError, split_into_issues
 from ingest.drive_sync import load_drive_ids, sync_all
-from ingest.extract_text import extract_pages, full_text
 from ingest.manual_review import log_manual_review
+from ingest.ocr_cache import get_or_extract_pages
+from ingest.page_mapping import article_page_range, build_page_line_map, word_pages_for_line_range
 from ingest.split_articles import ArticleSplitError, split_issue_into_articles
 from ingest.web_archive import check_for_new_issues, lookup_source_url
 
@@ -78,14 +85,47 @@ def process_pdf(pdf_path: Path, drive_file_id: str, staging_dir: Path, force: bo
         print(f"[SKIP] {pdf_path.name}: already fully processed (use --force to reprocess)")
         return 0
 
-    pages = extract_pages(pdf_path)
-
+    # File-level status (ingestion_files): one commit for the whole
+    # discover->OCR->issue-detection sequence on the happy path, or one
+    # commit recording exactly which stage failed -- so a resumed run can
+    # tell "never touched" from "OCR done, crashed after" from "OCR failed
+    # outright" without needing to re-OCR to find out.
+    status_conn = connect()
     try:
-        issues = split_into_issues(pages)
-    except IssueBoundaryError as exc:
-        log_manual_review(pdf_path.name, f"Gemini could not find issue boundaries: {exc}")
-        print(f"[SKIP] {pdf_path.name}: issue-boundary detection failed, logged for manual review")
-        return 0
+        upsert_ingestion_file(
+            status_conn,
+            drive_file_id=drive_file_id,
+            filename=pdf_path.name,
+            file_size=pdf_path.stat().st_size,
+        )
+
+        try:
+            pages = get_or_extract_pages(pdf_path, drive_file_id)
+        except Exception as exc:
+            record_file_failure(status_conn, drive_file_id, "ocr", str(exc))
+            status_conn.commit()
+            raise
+
+        # Real Sampada scans never have a trustworthy text layer (see
+        # extract_text.py) -- OCR is unconditionally required today; this
+        # column exists so a future native-text-layer check has somewhere
+        # to record a different answer without a schema change.
+        set_ocr_required(status_conn, drive_file_id, True)
+        mark_file_stage(status_conn, drive_file_id, "ocr_completed_at")
+
+        try:
+            issues = split_into_issues(pages)
+        except IssueBoundaryError as exc:
+            log_manual_review(pdf_path.name, f"Gemini could not find issue boundaries: {exc}")
+            print(f"[SKIP] {pdf_path.name}: issue-boundary detection failed, logged for manual review")
+            record_file_failure(status_conn, drive_file_id, "issue_detection", str(exc))
+            status_conn.commit()
+            return 0
+
+        mark_file_stage(status_conn, drive_file_id, "issue_detection_completed_at")
+        status_conn.commit()
+    finally:
+        status_conn.close()
 
     outcomes = [
         _process_one_issue(pdf_path, drive_file_id, boundary, issue_pages, force=force)
@@ -130,15 +170,18 @@ def _process_one_issue(
     finally:
         conn.close()
 
-    text = full_text(issue_pages)
-    if len(text) > 400_000:
+    # Preserves page identity through the join that would otherwise erase it
+    # (see ingest/page_mapping.py) -- no extra Gemini call, built purely
+    # from data already produced by OCR + issue-boundary detection.
+    joined_text, line_to_page = build_page_line_map(issue_pages)
+    if len(joined_text) > 400_000:
         print(
-            f"[WARN] {log_prefix}: extracted text is {len(text)} chars, "
+            f"[WARN] {log_prefix}: extracted text is {len(joined_text)} chars, "
             f"unusually large for one issue -- double check article splitting quality"
         )
 
     try:
-        articles = split_issue_into_articles(text)
+        articles = split_issue_into_articles(joined_text)
     except ArticleSplitError as exc:
         log_manual_review(pdf_path.name, f"{issue_month}: Gemini returned malformed article boundaries twice: {exc}")
         print(f"[SKIP] {log_prefix}: article splitting failed, logged for manual review")
@@ -151,6 +194,7 @@ def _process_one_issue(
 
     # Supplementary cross-check, 2021+ only -- see ingest/web_archive.py.
     source_url = lookup_source_url(issue_month) if boundary.year >= 2021 else None
+    lines = joined_text.split("\n")
 
     conn = connect()
     try:
@@ -167,9 +211,13 @@ def _process_one_issue(
             month=boundary.month,
             source_pdf_id=drive_file_id,
             source_url=source_url,
+            source_filename=pdf_path.name,
+            pdf_page_offset=boundary.start_page,
         )
 
         for article_index, article in enumerate(articles, start=1):
+            page_start, page_end = article_page_range(line_to_page, article.start_line, article.end_line)
+            word_pages = word_pages_for_line_range(lines, line_to_page, article.start_line, article.end_line)
             write_article(
                 conn,
                 article,
@@ -178,16 +226,41 @@ def _process_one_issue(
                 article_index=article_index,
                 source_url=source_url,
                 drive_file_id=drive_file_id,
+                issue_page_start=page_start,
+                issue_page_end=page_end,
+                word_pages=word_pages,
             )
+
+        mark_issue_stage(conn, boundary.year, boundary.month, "article_splitting_completed_at")
+        mark_issue_stage(conn, boundary.year, boundary.month, "chunked_at")
+        mark_issue_stage(conn, boundary.year, boundary.month, "embedded_at")
+        mark_issue_stage(conn, boundary.year, boundary.month, "indexed_at")
         conn.commit()
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        _record_durable_issue_failure(boundary, "writing", str(exc))
         raise
     finally:
         conn.close()
 
     print(f"[OK] {log_prefix}: {len(articles)} articles")
     return True, True
+
+
+def _record_durable_issue_failure(boundary: IssueBoundary, stage: str, reason: str) -> None:
+    """Best-effort failure record on a fresh connection, since the write
+    transaction that just failed already rolled back (taking a first-time
+    sampada row with it -- there's nothing to attach failure status to in
+    that case, and this UPDATE simply matches zero rows). For a --force
+    retry of an issue that previously succeeded, the existing row survives
+    the rollback and this durably records what went wrong instead of
+    silently looking untouched."""
+    conn = connect()
+    try:
+        record_issue_failure(conn, boundary.year, boundary.month, stage, reason)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def cmd_sync(_args) -> None:

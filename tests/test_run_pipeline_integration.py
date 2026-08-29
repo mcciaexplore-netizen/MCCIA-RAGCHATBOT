@@ -27,7 +27,11 @@ class _FakeCursor:
         return False
 
     def execute(self, sql, params=None):
-        sql_norm = sql.strip()
+        # mark_file_stage/mark_issue_stage build psycopg.sql.Composed
+        # objects (for a safely-whitelisted dynamic column name) rather
+        # than plain strings -- normalize either to text.
+        sql_text = sql.as_string(None) if hasattr(sql, "as_string") else sql
+        sql_norm = sql_text.strip()
         self._conn.executed.append((sql_norm, params))
         if "select source_pdf_id from sampada" in sql_norm:
             issue_month = f"{params[0]:04d}-{params[1]:02d}"
@@ -95,7 +99,7 @@ def _patched(fake_conn, issues, new_web_issues=(), pages=("page one",)):
         patch("ingest.run_pipeline.lookup_source_url", return_value=None),
         patch("ingest.db_writer.embed_texts", return_value=[[0.0] * 1536]),
         patch("ingest.run_pipeline.check_for_new_issues", return_value=list(new_web_issues)),
-        patch("ingest.run_pipeline.extract_pages", return_value=list(pages)),
+        patch("ingest.run_pipeline.get_or_extract_pages", return_value=list(pages)),
     )
 
 
@@ -109,9 +113,13 @@ def test_process_writes_articles_for_a_single_detected_issue(tmp_path, monkeypat
 
     fake_conn = _FakeConnection()
     boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    # start_line/end_line default to (0, 0) -- Article.body's word count must
+    # match issue_pages[0]'s (page 0 occupies line 0) for the page-mapping
+    # word-count invariant word_pages_for_line_range() enforces to hold, the
+    # same way it always does for a real Article sliced out of real OCR text.
     articles = [Article(title="Editorial", author="The Editor", body="Welcome to this special issue.")]
 
-    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    patches = _patched(fake_conn, issues=[(boundary, ["Welcome to this special issue.", "body"], articles)])
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_Args())
 
@@ -123,7 +131,7 @@ def test_process_writes_articles_for_a_single_detected_issue(tmp_path, monkeypat
     assert params[2] == 1  # article_index
     assert params[3] == "Editorial"  # article_title
     assert params[7] == "drive-abc123"  # source_pdf_id
-    assert fake_conn.commits == 1
+    assert fake_conn.commits == 2  # 1 file-level (ingestion_files) + 1 issue-level
 
 
 def test_process_assigns_one_based_article_indexes_within_an_issue(tmp_path, monkeypatch):
@@ -136,13 +144,16 @@ def test_process_assigns_one_based_article_indexes_within_an_issue(tmp_path, mon
 
     fake_conn = _FakeConnection()
     boundary = IssueBoundary(start_page=0, year=2021, month=6)
+    # All 3 default to start_line=end_line=0 (page 0's line) -- each body
+    # is 2 words, so page 0 must also be 2 words for the page-mapping
+    # word-count invariant to hold for all three.
     articles = [
         Article(title="Editorial", author="", body="Opening article."),
         Article(title="Industry News", author="", body="Second article."),
         Article(title="Member Notes", author="", body="Third article."),
     ]
 
-    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    patches = _patched(fake_conn, issues=[(boundary, ["cover page", "body"], articles)])
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_Args())
 
@@ -185,7 +196,50 @@ def test_process_writes_every_issue_bundled_in_one_pdf(tmp_path, monkeypatch):
     assert len(insert_calls) == 2
     issue_coordinates = {params[0:2] for _, params in insert_calls}
     assert issue_coordinates == {(1945, 7), (1946, 1)}
-    assert fake_conn.commits == 2  # one commit per issue, not one for the whole PDF
+    # 1 file-level commit (ingestion_files: OCR + issue-detection status)
+    # + 1 commit per issue -- issue writes still aren't one shared commit
+    # for the whole PDF, which is the property this test guards.
+    assert fake_conn.commits == 3
+
+
+def test_process_records_failure_stage_and_rolls_back_when_writing_articles_fails(tmp_path, monkeypatch):
+    # OCR/issue-detection/article-splitting all already succeeded (this is
+    # deliberately the "resumability after chunking/embedding" case) -- only
+    # the DB write step fails, on the second of two articles. The already-
+    # committed OCR cache means a retry never re-pays for OCR; this test
+    # covers that the failure itself is durably recorded, not silently lost.
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    review_log = tmp_path / "manual_review.csv"
+    monkeypatch.setenv("LOCAL_STAGING_DIR", str(staging))
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(review_log))
+    (staging / "bound.pdf").write_bytes(b"")
+    (staging / ".drive_ids.json").write_text('{"bound.pdf": "drive-bound"}')
+
+    fake_conn = _FakeConnection()
+    boundary = IssueBoundary(start_page=0, year=1950, month=5)
+    articles = [
+        Article(title="First", author="", body="first body"),
+        Article(title="Second", author="", body="second body"),
+    ]
+
+    patches = _patched(fake_conn, issues=[(boundary, ["first body", "second body"], articles)])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patch(
+        "ingest.run_pipeline.write_article", side_effect=[1, RuntimeError("embedding quota exceeded")]
+    ):
+        cmd_process(_Args())
+
+    assert fake_conn.rollbacks == 1
+
+    failure_updates = [e for e in fake_conn.executed if "failed = true" in e[0] and "sampada" in e[0]]
+    assert len(failure_updates) == 1
+    _, params = failure_updates[0]
+    assert params == ("writing", "embedding quota exceeded", 1950, 5)
+
+    # The unhandled exception still propagates to cmd_process's per-PDF
+    # catch-all -- one bad file's write failure doesn't crash the whole run.
+    assert review_log.exists()
+    assert "embedding quota exceeded" in review_log.read_text()
 
 
 def test_process_one_bad_issue_does_not_block_the_others_in_the_same_pdf(tmp_path, monkeypatch):
@@ -235,7 +289,8 @@ def test_process_logs_manual_review_when_issue_boundaries_undetectable(tmp_path,
     assert review_log.exists()
     assert "scan_final_v2.pdf" in review_log.read_text()
     assert not any("insert into articles" in e[0] for e in fake_conn.executed)
-    assert fake_conn.commits == 0
+    # 1 commit: the file-level ingestion_files failure record (stage=issue_detection).
+    assert fake_conn.commits == 1
 
 
 def test_process_skips_an_issue_already_in_the_database(tmp_path, monkeypatch):
@@ -318,7 +373,7 @@ def test_process_marks_a_file_fully_processed_once_every_issue_resolves(tmp_path
     boundary = IssueBoundary(start_page=0, year=1945, month=7)
     articles = [Article(title="News Roundup", author="", body="July news.")]
 
-    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    patches = _patched(fake_conn, issues=[(boundary, ["cover page", "body"], articles)])
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         cmd_process(_Args())
 
@@ -414,12 +469,12 @@ def test_process_can_retry_only_selected_failed_files(tmp_path, monkeypatch):
     fake_conn = _FakeConnection()
     boundary = IssueBoundary(start_page=0, year=1946, month=4)
     articles = [Article(title="Editorial", author="", body="April issue.")]
-    patches = _patched(fake_conn, issues=[(boundary, ["cover", "body"], articles)])
+    patches = _patched(fake_conn, issues=[(boundary, ["cover page", "body"], articles)])
 
     with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6] as extract:
         cmd_process(_SelectedArgs())
 
-    extract.assert_called_once_with(staging / "1946 April.PDF")
+    extract.assert_called_once_with(staging / "1946 April.PDF", "drive-1946")
     insert_calls = [e for e in fake_conn.executed if "insert into articles" in e[0]]
     assert len(insert_calls) == 1
     assert insert_calls[0][1][0:3] == (1946, 4, 1)

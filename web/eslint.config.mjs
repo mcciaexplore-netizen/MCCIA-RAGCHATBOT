@@ -7,10 +7,15 @@ const eslintConfig = defineConfig([
   ...nextTs,
   // Override default ignores of eslint-config-next.
   globalIgnores([
-    // Default ignores of eslint-config-next:
-    ".next/**",
-    "out/**",
-    "build/**",
+    // Default ignores of eslint-config-next -- leading "**/" so a stray
+    // nested build-cache dir (observed: Turbopack sometimes writes a
+    // duplicate web/web/.next/ in this environment, cause not tracked
+    // down, harmless but pollutes lint with thousands of bundled-JS
+    // findings if not excluded) is ignored at any depth, not just at
+    // the config file's own directory.
+    "**/.next/**",
+    "**/out/**",
+    "**/build/**",
     "next-env.d.ts",
   ]),
 ]);

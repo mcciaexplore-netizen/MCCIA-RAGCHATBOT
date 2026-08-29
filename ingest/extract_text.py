@@ -10,7 +10,10 @@ mixed English/Marathi content and old print quality well, so each page is
 rasterized and transcribed instead of reading a text layer.
 """
 
+import itertools
 import json
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator, List, Optional
 
@@ -19,9 +22,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError
 
-from db.config import gemini_api_key
-from ingest.config import GEMINI_OCR_MODEL, OCR_PAGE_BATCH_SIZE, OCR_PAGE_DPI
-from ingest.gemini_retry import call_with_retry
+from ingest.config import GEMINI_OCR_MODEL, OCR_CONCURRENCY, OCR_PAGE_BATCH_SIZE, OCR_PAGE_DPI
+from ingest.gemini_retry import call_with_retry, gemini_client
 from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You transcribe scanned pages from Sampada, an Indian \
@@ -54,10 +56,6 @@ class _PagesOut(BaseModel):
 
 class OcrError(Exception):
     """Gemini didn't return valid, schema-matching JSON after one retry."""
-
-
-def _client() -> genai.Client:
-    return genai.Client(api_key=gemini_api_key())
 
 
 def render_page_images(pdf_path: Path, dpi: int = OCR_PAGE_DPI) -> List[bytes]:
@@ -166,13 +164,41 @@ def _ocr_batch(batch_images: List[bytes], client: genai.Client) -> List[str]:
     return _ocr_batch(batch_images[:mid], client) + _ocr_batch(batch_images[mid:], client)
 
 
-def extract_pages(pdf_path: Path, client: Optional[genai.Client] = None) -> List[str]:
-    """Returns OCR'd text for each page, in order."""
-    client = client or _client()
+def extract_pages(
+    pdf_path: Path,
+    client: Optional[genai.Client] = None,
+    max_workers: Optional[int] = None,
+) -> List[str]:
+    """Returns OCR'd text for each page, in order.
 
-    pages: List[str] = []
-    for batch in iter_page_image_batches(pdf_path):
-        pages.extend(_ocr_batch(batch, client))
+    Batches are independent Gemini calls, so with max_workers > 1 they run
+    concurrently through a sliding window (submit up to max_workers ahead,
+    consume the oldest, submit the next) -- this bounds how many batches'
+    rendered images sit in memory at once to roughly max_workers, rather
+    than materializing a whole 900-page bound volume up front. Results are
+    reassembled in submission order regardless of which batch's call
+    actually completes first.
+    """
+    client = client or gemini_client()
+    workers = OCR_CONCURRENCY if max_workers is None else max_workers
+
+    batch_iter = iter_page_image_batches(pdf_path)
+    if workers <= 1:
+        pages: List[str] = []
+        for batch in batch_iter:
+            pages.extend(_ocr_batch(batch, client))
+        return pages
+
+    pages = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        window: deque = deque()
+        for batch in itertools.islice(batch_iter, workers):
+            window.append(pool.submit(_ocr_batch, batch, client))
+        for next_batch in batch_iter:
+            pages.extend(window.popleft().result())
+            window.append(pool.submit(_ocr_batch, next_batch, client))
+        while window:
+            pages.extend(window.popleft().result())
     return pages
 
 

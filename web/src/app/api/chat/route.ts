@@ -4,6 +4,7 @@ import { buildGeminiClient } from "@/lib/gemini/client";
 import { embedQuery } from "@/lib/gemini/embed";
 import { generateAnswer } from "@/lib/gemini/generate-answer";
 import { classifyQuery } from "@/lib/gemini/query-router";
+import { getCached, setCached } from "@/lib/query-cache";
 import type { ChatApiResponse } from "@/lib/types";
 
 const ChatRequestSchema = z.object({
@@ -21,6 +22,11 @@ export async function POST(request: Request) {
   }
 
   const { question } = parsed.data;
+
+  const cached = getCached<ChatApiResponse>(question);
+  if (cached) {
+    return NextResponse.json(cached);
+  }
 
   try {
     const client = buildGeminiClient();
@@ -42,7 +48,10 @@ export async function POST(request: Request) {
       citations,
       scope: route.scope,
       issueMonth: route.scope === "issue" ? route.issueMonth : null,
+      yearFrom: route.scope === "range" ? route.yearFrom : null,
+      yearTo: route.scope === "range" ? route.yearTo : null,
     };
+    setCached(question, body);
     return NextResponse.json(body);
   } catch (error) {
     console.error("[/api/chat] failed to answer question", error);

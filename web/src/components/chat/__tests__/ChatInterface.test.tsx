@@ -30,9 +30,13 @@ describe("ChatInterface", () => {
     const response: ChatApiResponse = {
       answerEnglish: 'MCCIA covered robotics (Sampada, June 2021, "Editorial").',
       answerMarathi: 'MCCIA ने रोबोटिक्सवर काम केले (Sampada, June 2021, "Editorial").',
-      citations: [{ articleId: 1, articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "" }],
+      citations: [
+        { articleId: 1, articleTitle: "Editorial", issueMonth: "2021-06", sourceUrl: "", page: null, pdfPageOffset: null },
+      ],
       scope: "issue",
       issueMonth: "2021-06",
+      yearFrom: null,
+      yearTo: null,
     };
     vi.mocked(fetch).mockResolvedValue(jsonResponse(response));
 

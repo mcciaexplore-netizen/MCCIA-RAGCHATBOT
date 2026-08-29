@@ -22,6 +22,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from db.config import google_drive_folder_id
 from ingest.config import google_service_account_file, local_staging_dir, require_for_drive
 from ingest.gemini_retry import TRANSIENT_STATUS_CODES, call_with_retry
+from ingest.manual_review import log_manual_review
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -96,15 +97,23 @@ def download_file(service, file_id: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     request = service.files().get_media(fileId=file_id)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with io.FileIO(tmp, "wb") as fh:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            _, done = call_with_retry(
-                f"Drive download {dest.name}",
-                downloader.next_chunk,
-                is_transient=_is_transient_drive_error,
-            )
+    try:
+        with io.FileIO(tmp, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = call_with_retry(
+                    f"Drive download {dest.name}",
+                    downloader.next_chunk,
+                    is_transient=_is_transient_drive_error,
+                )
+    except Exception:
+        # Don't leave a partial (possibly hundreds-of-MB) file behind on
+        # disk after a failed download -- the next sync_all() run starts
+        # this file fresh anyway (download_file always opens tmp in "wb"),
+        # so there's nothing to preserve, only space to reclaim.
+        tmp.unlink(missing_ok=True)
+        raise
     tmp.rename(dest)
 
 
@@ -156,7 +165,16 @@ def sync_all(dest_dir: Optional[Path] = None, service=None) -> list:
         if dest.exists() and dest.stat().st_size == f.size:
             _save_drive_ids(dest_dir, drive_ids)
             continue
-        download_file(service, f.file_id, dest)
+        # One file that exhausts its retries (or hits a permanent error)
+        # shouldn't take the whole archive-wide sync down with it -- log it
+        # for manual review and keep walking the rest of Drive, same as
+        # run_pipeline.process_pdf already does for OCR/processing failures.
+        try:
+            download_file(service, f.file_id, dest)
+        except Exception as exc:
+            log_manual_review(f.name, f"download failed: {exc!r}")
+            print(f"[SKIP] {f.name}: download failed, logged for manual review: {exc!r}")
+            continue
         downloaded.append(dest)
         _save_drive_ids(dest_dir, drive_ids)
     return downloaded

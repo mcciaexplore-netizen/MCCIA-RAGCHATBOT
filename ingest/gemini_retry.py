@@ -3,11 +3,18 @@
 import time
 from typing import Callable, Optional, TypeVar
 
+from google import genai
 from google.genai.errors import APIError
+
+from db.config import gemini_api_key
 
 T = TypeVar("T")
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def gemini_client() -> genai.Client:
+    return genai.Client(api_key=gemini_api_key())
 
 
 def _is_transient_gemini_error(exc: Exception) -> bool:

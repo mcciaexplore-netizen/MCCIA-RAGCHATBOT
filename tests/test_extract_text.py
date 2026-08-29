@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 import pymupdf
 import pytest
@@ -51,6 +53,32 @@ class _FakeGemini:
     @property
     def models(self):
         return _FakeModels(self, self._pages_by_call)
+
+
+class _FakeGeminiBySize:
+    """A thread-safe fake keyed by batch size (number of images) rather than
+    call order -- unlike _FakeGemini, this stays correct when multiple
+    batches are in flight at once and can complete in any order."""
+
+    def __init__(self, responses_by_size, delays_by_size=None):
+        self._responses_by_size = responses_by_size
+        self._delays_by_size = delays_by_size or {}
+        self._lock = threading.Lock()
+        self.calls = []
+
+    @property
+    def models(self):
+        return self
+
+    def generate_content(self, *, model, contents, config):
+        num_images = sum(1 for part in contents if not isinstance(part, str))
+        delay = self._delays_by_size.get(num_images, 0)
+        if delay:
+            time.sleep(delay)
+        with self._lock:
+            self.calls.append(num_images)
+        payload = self._responses_by_size[num_images]
+        return _FakeResponse(json.dumps({"pages": payload}))
 
 
 def test_render_page_images_returns_one_png_per_page(tmp_path):
@@ -174,6 +202,28 @@ def test_extract_pages_splits_a_failing_multi_page_batch_and_recovers(tmp_path):
 
     assert pages == ["page one recovered", "page two recovered"]
     assert len(client.calls) == 4
+
+
+def test_extract_pages_runs_batches_concurrently_and_preserves_page_order(tmp_path):
+    # 9 pages / batch size 6 -> batches of [6, 3] pages, distinct sizes so
+    # the fake can identify each regardless of arrival order. The first
+    # (larger) batch is delayed so the second batch's call actually reaches
+    # the fake first -- proving out-of-order completion still reassembles
+    # into correct page order.
+    pdf_path = tmp_path / "bound-volume.pdf"
+    _make_pdf(pdf_path, num_pages=9)
+    client = _FakeGeminiBySize(
+        responses_by_size={
+            6: [{"page_number": i, "text": f"page {i}"} for i in range(1, 7)],
+            3: [{"page_number": i, "text": f"page {i + 6}"} for i in range(1, 4)],
+        },
+        delays_by_size={6: 0.05},
+    )
+
+    pages = extract_pages(pdf_path, client=client, max_workers=2)
+
+    assert pages == [f"page {i}" for i in range(1, 10)]
+    assert sorted(client.calls) == [3, 6]
 
 
 def test_full_text_joins_all_pages():

@@ -66,6 +66,23 @@ def test_slice_articles_clamps_out_of_range_lines():
     assert "More women are entering it every year." in articles[0].body
 
 
+def test_slice_articles_preserves_line_range_for_page_attribution():
+    boundaries = [
+        ArticleBoundary(title="Editorial", author="The Editor", start_line=3, end_line=5),
+        ArticleBoundary(title="Women in Robotics", author="Asha Rao", start_line=7, end_line=10),
+    ]
+    articles = slice_articles(SAMPLE_TEXT, boundaries)
+    assert (articles[0].start_line, articles[0].end_line) == (3, 5)
+    assert (articles[1].start_line, articles[1].end_line) == (7, 10)
+
+
+def test_slice_articles_clamps_line_range_for_out_of_bounds_end_line():
+    boundaries = [ArticleBoundary(title="Runaway", author="", start_line=9, end_line=9999)]
+    articles = slice_articles(SAMPLE_TEXT, boundaries)
+    # SAMPLE_TEXT has 11 lines (indices 0-10) -- end_line must clamp to 10
+    assert (articles[0].start_line, articles[0].end_line) == (9, 10)
+
+
 def test_slice_articles_drops_empty_ranges():
     boundaries = [ArticleBoundary(title="Empty", author="", start_line=2, end_line=2)]
     articles = slice_articles(SAMPLE_TEXT, boundaries)

@@ -29,6 +29,13 @@ CHUNK_OVERLAP_TOKENS = 50
 OCR_PAGE_BATCH_SIZE = 6
 OCR_PAGE_DPI = 200
 
+# How many OCR batch calls run concurrently per PDF. 1 preserves the
+# original fully-sequential behavior (what the test suite exercises by
+# default); raise via the env var once real paid-tier quota headroom is
+# confirmed in the AI Studio rate-limit dashboard -- going too high just
+# trades 429 retries for wall-clock time back.
+OCR_CONCURRENCY = int(os.environ.get("OCR_CONCURRENCY", "1"))
+
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
@@ -54,6 +61,13 @@ def require_for_drive() -> None:
 
 def local_staging_dir() -> Path:
     return Path(_env("LOCAL_STAGING_DIR", "./staging/raw"))
+
+
+def processed_cache_dir() -> Path:
+    """Local-only cache of successfully-OCR'd page text, keyed by Drive file
+    ID -- see ingest/ocr_cache.py. Under staging/, already gitignored; never
+    served by the web app (which never reads from this path)."""
+    return Path(_env("PROCESSED_CACHE_DIR", "./staging/processed"))
 
 
 def manual_review_log() -> Path:

@@ -23,9 +23,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError
 
-from db.config import gemini_api_key
 from ingest.config import GEMINI_SPLIT_MODEL
-from ingest.gemini_retry import call_with_retry
+from ingest.gemini_retry import call_with_retry, gemini_client
 from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You split one scanned, bound PDF of Sampada (an Indian \
@@ -74,10 +73,6 @@ def number_page_previews(pages: List[str], preview_chars: int = 400) -> str:
     return "\n\n".join(
         f"PAGE{str(i).zfill(width)}:\n{text[:preview_chars]}" for i, text in enumerate(pages)
     )
-
-
-def _client() -> genai.Client:
-    return genai.Client(api_key=gemini_api_key())
 
 
 def _call_gemini(numbered_previews: str, client: genai.Client) -> str:
@@ -134,7 +129,7 @@ def request_boundaries(
     """Calls Gemini for strict JSON boundaries. Retries once on a malformed
     response; raises IssueBoundaryError if the retry also fails, so the
     caller can log and skip this PDF rather than write bad data."""
-    client = client or _client()
+    client = client or gemini_client()
 
     last_error: Optional[IssueBoundaryError] = None
     for _attempt in range(2):

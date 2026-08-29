@@ -20,9 +20,8 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError
 
-from db.config import gemini_api_key
 from ingest.config import GEMINI_SPLIT_MODEL
-from ingest.gemini_retry import call_with_retry
+from ingest.gemini_retry import call_with_retry, gemini_client
 from ingest.usage_tracker import log_usage
 
 SYSTEM_PROMPT = """You split one issue of Sampada, an Indian industrial trade \
@@ -67,6 +66,14 @@ class Article:
     title: str
     author: str
     body: str
+    # Clamped line indices (into the issue's joined text) this article's body
+    # came from -- defaulted so existing callers that only care about
+    # title/author/body (most tests, and any future caller) don't need to
+    # supply them. Populated by slice_articles(); used by run_pipeline to
+    # look up issue-relative page numbers via ingest/page_mapping.py without
+    # an extra Gemini call.
+    start_line: int = 0
+    end_line: int = 0
 
 
 class ArticleSplitError(Exception):
@@ -77,10 +84,6 @@ def number_lines(text: str) -> str:
     lines = text.split("\n")
     width = len(str(len(lines)))
     return "\n".join(f"L{str(i).zfill(width)}: {line}" for i, line in enumerate(lines))
-
-
-def _client() -> genai.Client:
-    return genai.Client(api_key=gemini_api_key())
 
 
 def _call_gemini(numbered_text: str, client: genai.Client) -> str:
@@ -135,7 +138,7 @@ def request_boundaries(numbered_text: str, client: Optional[genai.Client] = None
     response; raises ArticleSplitError if the retry also fails, so the
     caller can log and skip this issue rather than write bad data.
     """
-    client = client or _client()
+    client = client or gemini_client()
 
     last_error: Optional[ArticleSplitError] = None
     for _attempt in range(2):
@@ -164,7 +167,7 @@ def slice_articles(text: str, boundaries: List[ArticleBoundary]) -> List[Article
         body = "\n".join(lines[start : end + 1]).strip()
         if not body:
             continue
-        articles.append(Article(title=b.title, author=b.author, body=body))
+        articles.append(Article(title=b.title, author=b.author, body=body, start_line=start, end_line=end))
     return articles
 
 

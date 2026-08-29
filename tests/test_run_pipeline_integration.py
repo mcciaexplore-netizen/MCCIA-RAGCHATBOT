@@ -209,6 +209,68 @@ def test_process_never_calls_on_event_when_omitted(tmp_path, monkeypatch):
     assert len(insert_calls) == 1
 
 
+def test_process_pdf_never_holds_a_status_connection_open_across_ocr_or_boundary_detection(tmp_path, monkeypatch):
+    """Regression test for a real, live-reproduced bug: process_pdf() used to
+    hold one status connection open (uncommitted) across get_or_extract_pages()
+    and split_into_issues(), both of which can run for many minutes against a
+    real bound volume. A connection idle-in-transaction that long gets killed
+    by Neon's own idle_in_transaction_session_timeout (confirmed: 5 minutes),
+    which silently turned a fully-successful 127-page OCR into a recorded
+    failure. This asserts the actual safety property directly: whenever OCR or
+    boundary detection is about to run, the most recently opened status
+    connection has already been closed -- not just that the final commit count
+    happens to match."""
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    monkeypatch.setenv("MANUAL_REVIEW_LOG", str(tmp_path / "manual_review.csv"))
+    pdf_path = staging / "bound.pdf"
+    pdf_path.write_bytes(b"")
+
+    events = []
+    opened = []
+
+    class _TrackedConn(_FakeConnection):
+        def __init__(self, index):
+            super().__init__()
+            self.index = index
+
+        def close(self):
+            super().close()
+            events.append(("close", self.index))
+
+    def _fake_connect():
+        conn = _TrackedConn(len(opened))
+        opened.append(conn)
+        events.append(("open", conn.index))
+        return conn
+
+    def _fake_get_or_extract_pages(*_args, **_kwargs):
+        assert events and events[-1][0] == "close", (
+            f"a status connection was still open when OCR started: {events}"
+        )
+        return ["page one"]
+
+    def _fake_split_into_issues(_pages):
+        assert events[-1][0] == "close", (
+            f"a status connection was still open when boundary detection started: {events}"
+        )
+        boundary = IssueBoundary(start_page=0, year=1950, month=1)
+        return [(boundary, ["page one"])]
+
+    with patch("ingest.run_pipeline.connect", side_effect=_fake_connect), patch(
+        "ingest.run_pipeline.get_or_extract_pages", side_effect=_fake_get_or_extract_pages
+    ), patch("ingest.run_pipeline.split_into_issues", side_effect=_fake_split_into_issues), patch(
+        "ingest.run_pipeline.split_issue_into_articles",
+        return_value=[Article(title="Editorial", author="", body="page one")],
+    ), patch("ingest.run_pipeline.lookup_source_url", return_value=None), patch(
+        "ingest.db_writer.embed_texts", return_value=[[0.0] * 1536]
+    ):
+        process_pdf(pdf_path, "drive-x", staging)
+
+    assert len(opened) >= 3  # upsert_ingestion_file, ocr_completed_at, issue_detection_completed_at (at least)
+    assert events[0] == ("open", 0)
+
+
 def test_process_assigns_one_based_article_indexes_within_an_issue(tmp_path, monkeypatch):
     staging = tmp_path / "raw"
     staging.mkdir()
@@ -365,8 +427,9 @@ def test_process_logs_manual_review_when_issue_boundaries_undetectable(tmp_path,
     assert review_log.exists()
     assert "scan_final_v2.pdf" in review_log.read_text()
     assert not any("insert into articles" in e[0] for e in fake_conn.executed)
-    # 1 commit: the file-level ingestion_files failure record (stage=issue_detection).
-    assert fake_conn.commits == 1
+    # 3 commits: upsert_ingestion_file, ocr_completed_at (OCR succeeded --
+    # only boundary detection failed), and the failure record itself.
+    assert fake_conn.commits == 3
 
 
 def test_process_skips_an_issue_already_in_the_database(tmp_path, monkeypatch):

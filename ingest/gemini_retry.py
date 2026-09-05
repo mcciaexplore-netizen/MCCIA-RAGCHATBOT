@@ -3,7 +3,9 @@
 import time
 from typing import Callable, Optional, TypeVar
 
+import httpx
 from google import genai
+from google.genai import types
 from google.genai.errors import APIError
 
 from db.config import gemini_api_key
@@ -12,12 +14,29 @@ T = TypeVar("T")
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 
+# Confirmed live: with no timeout set, a Gemini request can hang indefinitely
+# on an established-but-idle connection (observed repeatedly during OCR of a
+# real archive PDF -- ps showed 0% CPU, lsof showed an open socket to
+# Google, and no progress for minutes at a stretch, across multiple restarts
+# of the same file). This bounds any single request; the existing retry loop
+# below (plus, for OCR specifically, extract_text.py's batch-splitting
+# fallback) turns a bounded timeout into graceful degradation instead of an
+# indefinite hang.
+GEMINI_REQUEST_TIMEOUT_MS = 120_000
+
 
 def gemini_client() -> genai.Client:
-    return genai.Client(api_key=gemini_api_key())
+    return genai.Client(
+        api_key=gemini_api_key(), http_options=types.HttpOptions(timeout=GEMINI_REQUEST_TIMEOUT_MS)
+    )
 
 
 def _is_transient_gemini_error(exc: Exception) -> bool:
+    # A timed-out or never-established request raises a raw httpx exception,
+    # not an APIError -- without this, the timeout above would just make a
+    # hang fail fast on the *first* attempt instead of actually retrying.
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+        return True
     if not isinstance(exc, APIError):
         return False
     return int(exc.code or 0) in TRANSIENT_STATUS_CODES

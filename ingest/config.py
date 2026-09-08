@@ -14,8 +14,7 @@ from pathlib import Path
 GEMINI_SPLIT_MODEL = "gemini-3.7-flash"
 GEMINI_CLASSIFY_MODEL = "gemini-3.5-flash-lite"
 GEMINI_EMBED_MODEL = "gemini-embedding-001"
-GEMINI_OCR_MODEL = "gemini-3.7-flash"
-
+GEMINI_OCR_MODEL = "gemini-2.5-flash-lite"
 # pgvector's HNSW/IVFFlat indexes cap at 2000 dims -- gemini-embedding-001
 # defaults to 3072, so this must be requested explicitly (see db/schema.sql).
 EMBEDDING_DIMENSIONS = 1536
